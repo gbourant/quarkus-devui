@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,7 +33,7 @@ import org.yaml.snakeyaml.Yaml;
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.arc.deployment.BeanContainerBuildItem;
 import io.quarkus.arc.processor.BuiltinScope;
-import io.quarkus.deployment.IsDevelopment;
+import io.quarkus.deployment.IsLocalDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
@@ -48,12 +49,15 @@ import io.quarkus.devui.deployment.extension.Extension;
 import io.quarkus.devui.deployment.jsonrpc.DevUIDatabindCodec;
 import io.quarkus.devui.runtime.DevUICORSFilter;
 import io.quarkus.devui.runtime.DevUIRecorder;
+import io.quarkus.devui.runtime.VertxRouteInfoService;
 import io.quarkus.devui.runtime.comms.JsonRpcRouter;
 import io.quarkus.devui.runtime.jsonrpc.JsonRpcMethod;
 import io.quarkus.devui.runtime.jsonrpc.JsonRpcMethodName;
 import io.quarkus.devui.runtime.jsonrpc.json.JsonMapper;
 import io.quarkus.devui.spi.DevUIContent;
 import io.quarkus.devui.spi.JsonRPCProvidersBuildItem;
+import io.quarkus.devui.spi.buildtime.BuildTimeActionBuildItem;
+import io.quarkus.devui.spi.buildtime.FooterLogBuildItem;
 import io.quarkus.devui.spi.buildtime.StaticContentBuildItem;
 import io.quarkus.devui.spi.page.CardPageBuildItem;
 import io.quarkus.devui.spi.page.FooterPageBuildItem;
@@ -61,11 +65,13 @@ import io.quarkus.devui.spi.page.MenuPageBuildItem;
 import io.quarkus.devui.spi.page.Page;
 import io.quarkus.devui.spi.page.PageBuilder;
 import io.quarkus.devui.spi.page.QuteDataPageBuilder;
+import io.quarkus.devui.spi.page.WebComponentPageBuilder;
 import io.quarkus.maven.dependency.GACT;
 import io.quarkus.maven.dependency.GACTV;
 import io.quarkus.qute.Qute;
 import io.quarkus.runtime.util.ClassPathUtils;
 import io.quarkus.vertx.http.deployment.FilterBuildItem;
+import io.quarkus.vertx.http.deployment.HttpRootPathBuildItem;
 import io.quarkus.vertx.http.deployment.NonApplicationRootPathBuildItem;
 import io.quarkus.vertx.http.deployment.RouteBuildItem;
 import io.quarkus.vertx.http.deployment.webjar.WebJarBuildItem;
@@ -84,7 +90,7 @@ import io.vertx.ext.web.RoutingContext;
  * This also find all jsonrpc methods and make them available in the jsonRPC Router
  */
 public class DevUIProcessor {
-
+    private static final String FOOTER_LOG_NAMESPACE = "devui-footer-log";
     private static final String DEVUI = "dev-ui";
     private static final String SLASH = "/";
     private static final String DOT = ".";
@@ -120,7 +126,7 @@ public class DevUIProcessor {
 
     private static final Logger log = Logger.getLogger(DevUIProcessor.class);
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     @Record(ExecutionTime.STATIC_INIT)
     void registerDevUiHandlers(
             DevUIConfig devUIConfig,
@@ -131,13 +137,19 @@ public class DevUIProcessor {
             DevUIRecorder recorder,
             LaunchModeBuildItem launchModeBuildItem,
             NonApplicationRootPathBuildItem nonApplicationRootPathBuildItem,
+            HttpRootPathBuildItem httpRootPathBuildItem,
             ShutdownContextBuildItem shutdownContext) throws IOException {
 
         if (launchModeBuildItem.isNotLocalDevModeType()) {
             return;
         }
 
-        if (devUIConfig.cors.enabled) {
+        routeProducer.produce(nonApplicationRootPathBuildItem.routeBuilder()
+                .orderedRoute(DEVUI + SLASH_ALL, -2 * FilterBuildItem.CORS)
+                .handler(recorder.createLocalHostOnlyFilter(devUIConfig.hosts().orElse(null)))
+                .build());
+
+        if (devUIConfig.cors().enabled()) {
             routeProducer.produce(nonApplicationRootPathBuildItem.routeBuilder()
                     .orderedRoute(DEVUI + SLASH_ALL, -1 * FilterBuildItem.CORS)
                     .handler(new DevUICORSFilter())
@@ -167,7 +179,7 @@ public class DevUIProcessor {
                     .handler(uihandler);
 
             if (route.endsWith(DEVUI + SLASH)) {
-                builder = builder.displayOnNotFoundPage("Dev UI (v2)");
+                builder = builder.displayOnNotFoundPage("Dev UI");
                 routeProducer.produce(builder.build());
             }
 
@@ -204,7 +216,7 @@ public class DevUIProcessor {
         Handler<RoutingContext> endpointInfoHandler = recorder.endpointInfoHandler(basepath);
 
         routeProducer.produce(
-                nonApplicationRootPathBuildItem.routeBuilder().route(DEVUI + SLASH + "endpoints.json")
+                nonApplicationRootPathBuildItem.routeBuilder().route(DEVUI + SLASH + "endpoints" + SLASH + "*")
                         .handler(endpointInfoHandler)
                         .build());
 
@@ -230,18 +242,37 @@ public class DevUIProcessor {
                 .route("dev")
                 .handler(recorder.redirect(contextRoot))
                 .build());
+
+        // Redirect naked to welcome if there is no index.html
+        if (!hasOwnIndexHtml()) {
+            routeProducer.produce(httpRootPathBuildItem.routeBuilder()
+                    .orderedRoute("/", Integer.MAX_VALUE)
+                    .handler(recorder.redirect(contextRoot, "welcome"))
+                    .build());
+        }
+    }
+
+    private boolean hasOwnIndexHtml() {
+        ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+        try {
+            Enumeration<URL> jarsWithIndexHtml = tccl.getResources("META-INF/resources/index.html");
+            return jarsWithIndexHtml.hasMoreElements();
+        } catch (IOException ex) {
+            throw new UncheckedIOException(ex);
+        }
     }
 
     /**
      * This makes sure the JsonRPC Classes for both the internal Dev UI and extensions is available as a bean and on the index.
      */
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     void additionalBean(BuildProducer<AdditionalBeanBuildItem> additionalBeanProducer,
             BuildProducer<AdditionalIndexedClassesBuildItem> additionalIndexProducer,
             List<JsonRPCProvidersBuildItem> jsonRPCProvidersBuildItems) {
 
         additionalBeanProducer.produce(AdditionalBeanBuildItem.builder()
                 .addBeanClass(JsonRpcRouter.class)
+                .addBeanClass(VertxRouteInfoService.class)
                 .setUnremovable().build());
 
         // Make sure all JsonRPC Providers is in the index
@@ -269,13 +300,14 @@ public class DevUIProcessor {
     /**
      * This goes through all jsonRPC methods and discover the methods using Jandex
      */
-    @BuildStep(onlyIf = IsDevelopment.class)
-    void findAllJsonRPCMethods(BuildProducer<JsonRPCMethodsBuildItem> jsonRPCMethodsProvider,
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
+    void findAllJsonRPCMethods(BuildProducer<JsonRPCRuntimeMethodsBuildItem> jsonRPCMethodsProvider,
             BuildProducer<BuildTimeConstBuildItem> buildTimeConstProducer,
             LaunchModeBuildItem launchModeBuildItem,
             CombinedIndexBuildItem combinedIndexBuildItem,
             CurateOutcomeBuildItem curateOutcomeBuildItem,
-            List<JsonRPCProvidersBuildItem> jsonRPCProvidersBuildItems) {
+            List<JsonRPCProvidersBuildItem> jsonRPCProvidersBuildItems,
+            DeploymentMethodBuildItem deploymentMethodBuildItem) {
 
         if (launchModeBuildItem.isNotLocalDevModeType()) {
             return;
@@ -346,8 +378,16 @@ public class DevUIProcessor {
             }
         }
 
+        if (deploymentMethodBuildItem.hasMethods()) {
+            requestResponseMethods.addAll(deploymentMethodBuildItem.getMethods());
+        }
+
+        if (deploymentMethodBuildItem.hasSubscriptions()) {
+            subscriptionMethods.addAll(deploymentMethodBuildItem.getSubscriptions());
+        }
+
         if (!extensionMethodsMap.isEmpty()) {
-            jsonRPCMethodsProvider.produce(new JsonRPCMethodsBuildItem(extensionMethodsMap));
+            jsonRPCMethodsProvider.produce(new JsonRPCRuntimeMethodsBuildItem(extensionMethodsMap));
         }
 
         BuildTimeConstBuildItem methodInfo = new BuildTimeConstBuildItem("devui-jsonrpc");
@@ -363,11 +403,12 @@ public class DevUIProcessor {
 
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
-    @Record(ExecutionTime.STATIC_INIT)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
+    @Record(ExecutionTime.RUNTIME_INIT)
     void createJsonRpcRouter(DevUIRecorder recorder,
             BeanContainerBuildItem beanContainer,
-            JsonRPCMethodsBuildItem jsonRPCMethodsBuildItem) {
+            JsonRPCRuntimeMethodsBuildItem jsonRPCMethodsBuildItem,
+            DeploymentMethodBuildItem deploymentMethodBuildItem) {
 
         if (jsonRPCMethodsBuildItem != null) {
             Map<String, Map<JsonRpcMethodName, JsonRpcMethod>> extensionMethodsMap = jsonRPCMethodsBuildItem
@@ -375,14 +416,67 @@ public class DevUIProcessor {
 
             DevConsoleManager.setGlobal(DevUIRecorder.DEV_MANAGER_GLOBALS_JSON_MAPPER_FACTORY,
                     JsonMapper.Factory.deploymentLinker().createLinkData(new DevUIDatabindCodec.Factory()));
-            recorder.createJsonRpcRouter(beanContainer.getValue(), extensionMethodsMap);
+            recorder.createJsonRpcRouter(beanContainer.getValue(), extensionMethodsMap, deploymentMethodBuildItem.getMethods(),
+                    deploymentMethodBuildItem.getSubscriptions(), deploymentMethodBuildItem.getRecordedValues());
         }
     }
 
     /**
      * This build all the pages for dev ui, based on the extension included
      */
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
+    void processFooterLogs(BuildProducer<BuildTimeActionBuildItem> buildTimeActionProducer,
+            BuildProducer<FooterPageBuildItem> footerPageProducer,
+            List<FooterLogBuildItem> footerLogBuildItems) {
+
+        List<BuildTimeActionBuildItem> devServiceLogs = new ArrayList<>();
+        List<FooterPageBuildItem> footers = new ArrayList<>();
+
+        for (FooterLogBuildItem footerLogBuildItem : footerLogBuildItems) {
+            // Create the Json-RPC service that will stream the log
+            String name = footerLogBuildItem.getName().replaceAll(" ", "");
+
+            BuildTimeActionBuildItem devServiceLogActions = new BuildTimeActionBuildItem(FOOTER_LOG_NAMESPACE);
+            if (footerLogBuildItem.hasRuntimePublisher()) {
+                devServiceLogActions.addSubscription(name + "Log", footerLogBuildItem.getRuntimePublisher());
+            } else {
+                devServiceLogActions.addSubscription(name + "Log", ignored -> {
+                    try {
+                        return footerLogBuildItem.getPublisher();
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
+            devServiceLogs.add(devServiceLogActions);
+
+            // Create the Footer in the Dev UI
+            WebComponentPageBuilder log = Page.webComponentPageBuilder().internal()
+                    .namespace(FOOTER_LOG_NAMESPACE)
+                    .icon("font-awesome-regular:file-lines")
+                    .title(capitalizeFirstLetter(footerLogBuildItem.getName()))
+                    .metadata("jsonRpcMethodName", footerLogBuildItem.getName() + "Log")
+                    .componentLink("qwc-footer-log.js");
+
+            FooterPageBuildItem footerPageBuildItem = new FooterPageBuildItem(FOOTER_LOG_NAMESPACE, log);
+            footers.add(footerPageBuildItem);
+        }
+
+        buildTimeActionProducer.produce(devServiceLogs);
+        footerPageProducer.produce(footers);
+    }
+
+    private String capitalizeFirstLetter(String input) {
+        if (input == null || input.isEmpty()) {
+            return input;
+        }
+        return input.substring(0, 1).toUpperCase() + input.substring(1);
+    }
+
+    /**
+     * This build all the pages for dev ui, based on the extension included
+     */
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     @SuppressWarnings("unchecked")
     void getAllExtensions(List<CardPageBuildItem> cardPageBuildItems,
             List<MenuPageBuildItem> menuPageBuildItems,
@@ -410,7 +504,7 @@ public class DevUIProcessor {
         // Now go through all extensions and check them for active components
         Map<String, CardPageBuildItem> cardPagesMap = getCardPagesMap(curateOutcomeBuildItem, cardPageBuildItems);
         Map<String, MenuPageBuildItem> menuPagesMap = getMenuPagesMap(curateOutcomeBuildItem, menuPageBuildItems);
-        Map<String, FooterPageBuildItem> footerPagesMap = getFooterPagesMap(curateOutcomeBuildItem, footerPageBuildItems);
+        Map<String, List<FooterPageBuildItem>> footerPagesMap = getFooterPagesMap(curateOutcomeBuildItem, footerPageBuildItems);
         try {
             final Yaml yaml = new Yaml();
             List<Extension> activeExtensions = new ArrayList<>();
@@ -466,11 +560,11 @@ public class DevUIProcessor {
                         }
 
                         if (metaData.containsKey(CODESTART)) {
-                            Map<String, Object> codestartMap = (Map<String, Object>) metaData.get(metaData);
+                            Map<String, Object> codestartMap = (Map<String, Object>) metaData.get(CODESTART);
                             if (codestartMap != null) {
                                 Codestart codestart = new Codestart();
                                 codestart.setName((String) codestartMap.getOrDefault(NAME, null));
-                                codestart.setLanguages((List<String>) codestartMap.getOrDefault(LANGUAGES, null));
+                                codestart.setLanguages(listOrString(codestartMap, LANGUAGES));
                                 codestart.setArtifact((String) codestartMap.getOrDefault(ARTIFACT, null));
                                 extension.setCodestart(codestart);
                             }
@@ -520,18 +614,21 @@ public class DevUIProcessor {
 
                         // Tabs in the footer
                         if (footerPagesMap.containsKey(namespace)) {
-                            FooterPageBuildItem footerPageBuildItem = footerPagesMap.get(namespace);
-                            List<PageBuilder> footerPageBuilders = footerPageBuildItem.getPages();
 
-                            Map<String, Object> buildTimeData = footerPageBuildItem.getBuildTimeData();
-                            for (PageBuilder pageBuilder : footerPageBuilders) {
-                                Page page = buildFinalPage(pageBuilder, extension, buildTimeData);
-                                extension.addFooterPage(page);
+                            List<FooterPageBuildItem> fbis = footerPagesMap.get(namespace);
+                            for (FooterPageBuildItem footerPageBuildItem : fbis) {
+                                List<PageBuilder> footerPageBuilders = footerPageBuildItem.getPages();
+
+                                Map<String, Object> buildTimeData = footerPageBuildItem.getBuildTimeData();
+                                for (PageBuilder pageBuilder : footerPageBuilders) {
+                                    Page page = buildFinalPage(pageBuilder, extension, buildTimeData);
+                                    extension.addFooterPage(page);
+                                }
+                                // Also make sure the static resources for that static resource is available
+                                produceResources(artifactId, webJarBuildProducer,
+                                        devUIWebJarProducer);
+                                footerTabExtensions.add(extension);
                             }
-                            // Also make sure the static resources for that static resource is available
-                            produceResources(artifactId, webJarBuildProducer,
-                                    devUIWebJarProducer);
-                            footerTabExtensions.add(extension);
                         }
 
                     }
@@ -543,6 +640,33 @@ public class DevUIProcessor {
                     log.error("Failed to process extension descriptor " + p.toUri(), e);
                 }
             });
+
+            // Also add footers for extensions that might not have a runtime
+            if (!footerPagesMap.isEmpty()) {
+                for (Map.Entry<String, List<FooterPageBuildItem>> footer : footerPagesMap.entrySet()) {
+                    List<FooterPageBuildItem> fbis = footer.getValue();
+                    for (FooterPageBuildItem footerPageBuildItem : fbis) {
+                        if (footerPageBuildItem.isInternal()) {
+                            Extension deploymentOnlyExtension = new Extension();
+                            deploymentOnlyExtension.setName(footer.getKey());
+                            deploymentOnlyExtension.setNamespace(FOOTER_LOG_NAMESPACE);
+
+                            List<PageBuilder> footerPageBuilders = footerPageBuildItem.getPages();
+
+                            for (PageBuilder pageBuilder : footerPageBuilders) {
+                                pageBuilder.namespace(deploymentOnlyExtension.getNamespace());
+                                pageBuilder.extension(deploymentOnlyExtension.getName());
+                                pageBuilder.internal();
+                                Page page = pageBuilder.build();
+                                deploymentOnlyExtension.addFooterPage(page);
+                            }
+
+                            footerTabExtensions.add(deploymentOnlyExtension);
+                        }
+                    }
+                }
+            }
+
             extensionsProducer.produce(
                     new ExtensionsBuildItem(activeExtensions, inactiveExtensions, sectionMenuExtensions, footerTabExtensions));
         } catch (IOException ex) {
@@ -563,6 +687,18 @@ public class DevUIProcessor {
                     .collect(Collectors.joining(", "));
         }
         return String.valueOf(value);
+    }
+
+    private List<String> listOrString(Map<String, Object> metaData, String key) {
+        Object value = metaData.getOrDefault(key, null);
+        if (value == null) {
+            return null;
+        } else if (String.class.isAssignableFrom(value.getClass())) {
+            return List.of((String) value);
+        } else if (List.class.isAssignableFrom(value.getClass())) {
+            return (List) value;
+        }
+        return List.of(String.valueOf(value));
     }
 
     private void produceResources(String artifactId,
@@ -599,7 +735,7 @@ public class DevUIProcessor {
                         DEVUI));
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     void createAllRoutes(WebJarResultsBuildItem webJarResultsBuildItem,
             LaunchModeBuildItem launchModeBuildItem,
             List<DevUIWebJarBuildItem> devUIWebJarBuiltItems,
@@ -703,11 +839,19 @@ public class DevUIProcessor {
         return m;
     }
 
-    private Map<String, FooterPageBuildItem> getFooterPagesMap(CurateOutcomeBuildItem curateOutcomeBuildItem,
+    private Map<String, List<FooterPageBuildItem>> getFooterPagesMap(CurateOutcomeBuildItem curateOutcomeBuildItem,
             List<FooterPageBuildItem> pages) {
-        Map<String, FooterPageBuildItem> m = new HashMap<>();
+        Map<String, List<FooterPageBuildItem>> m = new HashMap<>();
         for (FooterPageBuildItem pageBuildItem : pages) {
-            m.put(pageBuildItem.getExtensionPathName(curateOutcomeBuildItem), pageBuildItem);
+
+            String key = pageBuildItem.getExtensionPathName(curateOutcomeBuildItem);
+            if (m.containsKey(key)) {
+                m.get(key).add(pageBuildItem);
+            } else {
+                List<FooterPageBuildItem> fbi = new ArrayList<>();
+                fbi.add(pageBuildItem);
+                m.put(key, fbi);
+            }
         }
         return m;
     }

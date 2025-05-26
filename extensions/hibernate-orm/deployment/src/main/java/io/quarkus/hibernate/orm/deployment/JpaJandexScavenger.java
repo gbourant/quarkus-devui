@@ -86,7 +86,7 @@ public final class JpaJandexScavenger {
     public JpaModelBuildItem discoverModelAndRegisterForReflection() throws BuildException {
         Collector collector = new Collector();
 
-        for (DotName packageAnnotation : HibernateOrmTypes.PACKAGE_ANNOTATIONS) {
+        for (DotName packageAnnotation : ClassNames.PACKAGE_ANNOTATIONS) {
             enlistJPAModelAnnotatedPackages(collector, packageAnnotation);
         }
         enlistJPAModelClasses(collector, ClassNames.JPA_ENTITY);
@@ -96,7 +96,7 @@ public final class JpaJandexScavenger {
         enlistEmbeddedsAndElementCollections(collector);
 
         enlistPotentialCdiBeanClasses(collector, ClassNames.CONVERTER);
-        for (DotName annotation : HibernateOrmTypes.JPA_LISTENER_ANNOTATIONS) {
+        for (DotName annotation : ClassNames.JPA_LISTENER_ANNOTATIONS) {
             enlistPotentialCdiBeanClasses(collector, annotation);
         }
 
@@ -108,6 +108,11 @@ public final class JpaJandexScavenger {
         managedClassNames.addAll(collector.modelTypes);
         for (String className : managedClassNames) {
             reflectiveClass.produce(ReflectiveClassBuildItem.builder(className).methods().fields().build());
+            // Register static metamodel classes as well, so that their `class_` attribute can be populated.
+            // See org.hibernate.metamodel.internal.MetadataContext.populateStaticMetamodel
+            // Note: registering classes that do not exist is not a problem -- and is necessary if the application
+            //       tries to access these classes via reflection anyway (which it will, through Hibernate ORM).
+            reflectiveClass.produce(ReflectiveClassBuildItem.builder(className + "_").fields().build());
         }
 
         if (!collector.enumTypes.isEmpty()) {
@@ -424,24 +429,13 @@ public final class JpaJandexScavenger {
 
         for (AnnotationInstance annotation : jpaAnnotations) {
             AnnotationTarget target = annotation.target();
-            ClassInfo beanType;
-            switch (target.kind()) {
-                case CLASS:
-                    beanType = target.asClass();
-                    break;
-                case FIELD:
-                    beanType = target.asField().declaringClass();
-                    break;
-                case METHOD:
-                    beanType = target.asMethod().declaringClass();
-                    break;
-                case METHOD_PARAMETER:
-                case TYPE:
-                case RECORD_COMPONENT:
-                default:
-                    throw new IllegalArgumentException(
-                            "Annotation " + dotName + " was not expected on a target of kind " + target.kind());
-            }
+            ClassInfo beanType = switch (target.kind()) {
+                case CLASS -> target.asClass();
+                case FIELD -> target.asField().declaringClass();
+                case METHOD -> target.asMethod().declaringClass();
+                default -> throw new IllegalArgumentException(
+                        "Annotation " + dotName + " was not expected on a target of kind " + target.kind());
+            };
             DotName beanTypeDotName = beanType.name();
             collector.potentialCdiBeanTypes.add(beanTypeDotName);
         }

@@ -3,6 +3,7 @@ package io.quarkus.hibernate.orm.runtime;
 import java.lang.annotation.Annotation;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 
 import jakarta.enterprise.inject.Default;
@@ -13,6 +14,7 @@ import io.quarkus.arc.Arc;
 import io.quarkus.arc.InjectableInstance;
 import io.quarkus.hibernate.orm.PersistenceUnit;
 import io.quarkus.hibernate.orm.PersistenceUnitExtension;
+import io.quarkus.runtime.configuration.ConfigurationException;
 
 public class PersistenceUnitUtil {
     private static final Logger LOG = Logger.getLogger(PersistenceUnitUtil.class);
@@ -29,10 +31,12 @@ public class PersistenceUnitUtil {
         InjectableInstance<T> instance = extensionInstanceForPersistenceUnit(beanType, persistenceUnitName,
                 additionalQualifiers);
         if (instance.isAmbiguous()) {
+            List<String> ambiguousClassNames = instance.handlesStream().map(h -> h.getBean().getBeanClass().getCanonicalName())
+                    .toList();
             throw new IllegalStateException(String.format(Locale.ROOT,
                     "Multiple instances of %1$s were found for persistence unit %2$s. "
-                            + "At most one instance can be assigned to each persistence unit.",
-                    beanType.getSimpleName(), persistenceUnitName));
+                            + "At most one instance can be assigned to each persistence unit. Instances found: %3$s",
+                    beanType.getSimpleName(), persistenceUnitName, ambiguousClassNames));
         }
         return instance;
     }
@@ -103,5 +107,14 @@ public class PersistenceUnitUtil {
 
     private static <T> boolean isDefaultBean(InjectableInstance<T> instance) {
         return instance.isResolvable() && instance.getHandle().getBean().isDefaultBean();
+    }
+
+    public static ConfigurationException unableToFindDataSource(String persistenceUnitName,
+            String dataSourceName,
+            Throwable cause) {
+        return new ConfigurationException(String.format(Locale.ROOT,
+                "Unable to find datasource '%s' for persistence unit '%s': %s",
+                dataSourceName, persistenceUnitName, cause.getMessage()),
+                cause);
     }
 }

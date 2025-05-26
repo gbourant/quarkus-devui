@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
 
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -14,6 +15,7 @@ import io.quarkus.devui.tests.DevUIJsonRPCTest;
 import io.quarkus.test.QuarkusDevModeTest;
 import io.restassured.RestAssured;
 
+@Tag(TestTags.DEVMODE)
 public class HibernateSchemaRecreateDevConsoleTestCase extends DevUIJsonRPCTest {
 
     @RegisterExtension
@@ -32,7 +34,7 @@ public class HibernateSchemaRecreateDevConsoleTestCase extends DevUIJsonRPCTest 
         RestAssured.when().get("/my-entity/count").then().body(is("2"));
         RestAssured.when().get("/my-entity/add").then().body(is("MyEntity:added"));
         RestAssured.when().get("/my-entity/count").then().body(is("3"));
-        Map<String, String> params = Map.of("ds", "<default>");
+        Map<String, Object> params = Map.of("ds", "<default>");
         JsonNode success = super.executeJsonRPCMethod("reset", params);
         assertTrue(success.asBoolean());
         RestAssured.when().get("/my-entity/count").then().body(is("2"));

@@ -49,6 +49,7 @@ import io.quarkus.hibernate.reactive.panache.common.runtime.ReactiveTransactiona
 import io.quarkus.hibernate.reactive.panache.common.runtime.TestReactiveTransactionalInterceptor;
 import io.quarkus.hibernate.reactive.panache.common.runtime.WithSessionInterceptor;
 import io.quarkus.hibernate.reactive.panache.common.runtime.WithSessionOnDemandInterceptor;
+import io.quarkus.hibernate.reactive.panache.common.runtime.WithTransactionInterceptor;
 
 @BuildSteps(onlyIf = HibernateOrmEnabled.class)
 public final class PanacheJpaCommonResourceProcessor {
@@ -60,6 +61,11 @@ public final class PanacheJpaCommonResourceProcessor {
     @BuildStep(onlyIf = IsTest.class)
     void testTx(BuildProducer<GeneratedBeanBuildItem> generatedBeanBuildItemBuildProducer,
             BuildProducer<AdditionalBeanBuildItem> additionalBeans) {
+
+        if (!testReactiveTransactionOnClassPath()) {
+            return;
+        }
+
         //generate the annotated interceptor with gizmo
         //all the logic is in the parent, but we don't have access to the
         //binding annotation here
@@ -75,12 +81,22 @@ public final class PanacheJpaCommonResourceProcessor {
                 .addBeanClass(TEST_REACTIVE_TRANSACTION).build());
     }
 
+    private static boolean testReactiveTransactionOnClassPath() {
+        try {
+            Class.forName(TEST_REACTIVE_TRANSACTION, false, Thread.currentThread().getContextClassLoader());
+            return true;
+        } catch (ClassNotFoundException ignored) {
+            return false;
+        }
+    }
+
     @BuildStep
     void registerInterceptors(BuildProducer<AdditionalBeanBuildItem> additionalBeans) {
         AdditionalBeanBuildItem.Builder builder = AdditionalBeanBuildItem.builder();
         builder.addBeanClass(WithSessionOnDemandInterceptor.class);
         builder.addBeanClass(WithSessionInterceptor.class);
         builder.addBeanClass(ReactiveTransactionalInterceptor.class);
+        builder.addBeanClass(WithTransactionInterceptor.class);
         additionalBeans.produce(builder.build());
     }
 

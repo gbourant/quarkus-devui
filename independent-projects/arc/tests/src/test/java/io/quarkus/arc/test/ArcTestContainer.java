@@ -19,6 +19,8 @@ import java.util.stream.Collectors;
 
 import jakarta.enterprise.inject.build.compatible.spi.BuildCompatibleExtension;
 
+import org.jboss.jandex.AnnotationTransformation;
+import org.jboss.jandex.ClassInfo;
 import org.jboss.jandex.CompositeIndex;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.Index;
@@ -82,17 +84,18 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
         private final List<QualifierRegistrar> qualifierRegistrars;
         private final List<InterceptorBindingRegistrar> interceptorBindingRegistrars;
         private final List<StereotypeRegistrar> stereotypeRegistrars;
-        private final List<AnnotationsTransformer> annotationsTransformers;
+        private final List<AnnotationTransformation> annotationsTransformers;
         private final List<InjectionPointsTransformer> injectionsPointsTransformers;
         private final List<ObserverTransformer> observerTransformers;
         private final List<BeanDeploymentValidator> beanDeploymentValidators;
         private boolean shouldFail = false;
         private boolean removeUnusedBeans = false;
-        private final List<Predicate<BeanInfo>> exclusions;
+        private final List<Predicate<BeanInfo>> removalExclusions;
         private AlternativePriorities alternativePriorities;
         private final List<BuildCompatibleExtension> buildCompatibleExtensions;
         private boolean strictCompatibility = false;
         private boolean optimizeContexts = false;
+        private final List<Predicate<ClassInfo>> excludeTypes;
 
         public Builder() {
             resourceReferenceProviders = new ArrayList<>();
@@ -109,8 +112,9 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
             injectionsPointsTransformers = new ArrayList<>();
             observerTransformers = new ArrayList<>();
             beanDeploymentValidators = new ArrayList<>();
-            exclusions = new ArrayList<>();
+            removalExclusions = new ArrayList<>();
             buildCompatibleExtensions = new ArrayList<>();
+            excludeTypes = new ArrayList<>();
         }
 
         public Builder resourceReferenceProviders(Class<?>... resourceReferenceProviders) {
@@ -149,8 +153,17 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
             return this;
         }
 
+        /**
+         * @deprecated use {@link #annotationTransformations(AnnotationTransformation...)}
+         */
+        @Deprecated(forRemoval = true)
         public Builder annotationsTransformers(AnnotationsTransformer... transformers) {
             Collections.addAll(this.annotationsTransformers, transformers);
+            return this;
+        }
+
+        public Builder annotationTransformations(AnnotationTransformation... transformations) {
+            Collections.addAll(this.annotationsTransformers, transformations);
             return this;
         }
 
@@ -190,7 +203,7 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
         }
 
         public Builder addRemovalExclusion(Predicate<BeanInfo> exclusion) {
-            this.exclusions.add(exclusion);
+            this.removalExclusions.add(exclusion);
             return this;
         }
 
@@ -219,6 +232,11 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
             return this;
         }
 
+        public Builder excludeType(Predicate<ClassInfo> predicate) {
+            this.excludeTypes.add(predicate);
+            return this;
+        }
+
         public ArcTestContainer build() {
             return new ArcTestContainer(this);
         }
@@ -229,6 +247,7 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
 
     private final List<Class<?>> beanClasses;
     private final List<Class<?>> additionalClasses;
+    private final List<Predicate<ClassInfo>> excludeTypes;
 
     private final List<Class<? extends Annotation>> resourceAnnotations;
 
@@ -238,7 +257,7 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
     private final List<QualifierRegistrar> qualifierRegistrars;
     private final List<InterceptorBindingRegistrar> interceptorBindingRegistrars;
     private final List<StereotypeRegistrar> stereotypeRegistrars;
-    private final List<AnnotationsTransformer> annotationsTransformers;
+    private final List<AnnotationTransformation> annotationsTransformers;
     private final List<InjectionPointsTransformer> injectionPointsTransformers;
     private final List<ObserverTransformer> observerTransformers;
     private final List<BeanDeploymentValidator> beanDeploymentValidators;
@@ -247,7 +266,7 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
     private final AtomicReference<Throwable> buildFailure;
 
     private final boolean removeUnusedBeans;
-    private final List<Predicate<BeanInfo>> exclusions;
+    private final List<Predicate<BeanInfo>> removalExclusions;
 
     private final AlternativePriorities alternativePriorities;
 
@@ -274,11 +293,12 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
         this.buildFailure = new AtomicReference<Throwable>(null);
         this.shouldFail = false;
         this.removeUnusedBeans = false;
-        this.exclusions = Collections.emptyList();
+        this.removalExclusions = Collections.emptyList();
         this.alternativePriorities = null;
         this.buildCompatibleExtensions = Collections.emptyList();
         this.strictCompatibility = false;
         this.optimizeContexts = false;
+        this.excludeTypes = Collections.emptyList();
     }
 
     public ArcTestContainer(Builder builder) {
@@ -299,11 +319,12 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
         this.buildFailure = new AtomicReference<Throwable>(null);
         this.shouldFail = builder.shouldFail;
         this.removeUnusedBeans = builder.removeUnusedBeans;
-        this.exclusions = builder.exclusions;
+        this.removalExclusions = builder.removalExclusions;
         this.alternativePriorities = builder.alternativePriorities;
         this.buildCompatibleExtensions = builder.buildCompatibleExtensions;
         this.strictCompatibility = builder.strictCompatibility;
         this.optimizeContexts = builder.optimizeContexts;
+        this.excludeTypes = builder.excludeTypes;
     }
 
     // this is where we start Arc, we operate on a per-method basis
@@ -433,10 +454,11 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
             qualifierRegistrars.forEach(builder::addQualifierRegistrar);
             interceptorBindingRegistrars.forEach(builder::addInterceptorBindingRegistrar);
             stereotypeRegistrars.forEach(builder::addStereotypeRegistrar);
-            annotationsTransformers.forEach(builder::addAnnotationTransformer);
+            annotationsTransformers.forEach(builder::addAnnotationTransformation);
             injectionPointsTransformers.forEach(builder::addInjectionPointTransformer);
             observerTransformers.forEach(builder::addObserverTransformer);
             beanDeploymentValidators.forEach(builder::addBeanDeploymentValidator);
+            excludeTypes.forEach(builder::addExcludeType);
             builder.setOutput(new ResourceOutput() {
 
                 @Override
@@ -461,7 +483,7 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
                 }
             });
             builder.setRemoveUnusedBeans(removeUnusedBeans);
-            for (Predicate<BeanInfo> exclusion : exclusions) {
+            for (Predicate<BeanInfo> exclusion : removalExclusions) {
                 builder.addRemovalExclusion(exclusion);
             }
             builder.setAlternativePriorities(alternativePriorities);
@@ -482,7 +504,6 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
             // Now we are ready to initialize Arc
             ArcInitConfig.Builder initConfigBuilder = ArcInitConfig.builder();
             initConfigBuilder.setStrictCompatibility(strictCompatibility);
-            initConfigBuilder.setOptimizeContexts(optimizeContexts);
             Arc.initialize(initConfigBuilder.build());
 
         } catch (Throwable e) {
@@ -494,6 +515,10 @@ public class ArcTestContainer implements BeforeEachCallback, AfterEachCallback {
                 } else {
                     throw new RuntimeException(e);
                 }
+            }
+        } finally {
+            if (shouldFail && buildFailure.get() == null) {
+                throw new AssertionError("The container was expected to fail!");
             }
         }
         return old;

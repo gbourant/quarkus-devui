@@ -105,7 +105,7 @@ public class QuarkusPluginTest {
 
     @Test
     public void shouldNotFailOnProjectDependenciesWithoutMain(@TempDir Path testProjectDir) throws IOException {
-        var kotlinVersion = System.getProperty("kotlin_version", "1.9.10");
+        var kotlinVersion = System.getProperty("kotlin_version", "2.1.21");
         var settingFile = testProjectDir.resolve("settings.gradle.kts");
         var mppProjectDir = testProjectDir.resolve("mpp");
         var quarkusProjectDir = testProjectDir.resolve("quarkus");
@@ -158,7 +158,7 @@ public class QuarkusPluginTest {
         BuildResult result = GradleRunner.create()
                 .withPluginClasspath()
                 .withProjectDir(testProjectDir.toFile())
-                .withArguments("quarkusGenerateCode")
+                .withArguments("quarkusGenerateCode", "--stacktrace")
                 .build();
 
         assertEquals(SUCCESS, result.task(":quarkus:quarkusGenerateCode").getOutcome());

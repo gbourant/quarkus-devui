@@ -6,7 +6,8 @@ import java.util.Map;
 import java.util.Optional;
 
 import io.quarkus.arc.deployment.BeanContainerBuildItem;
-import io.quarkus.deployment.IsDevelopment;
+import io.quarkus.deployment.IsLocalDevelopment;
+import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
@@ -14,12 +15,13 @@ import io.quarkus.deployment.builditem.LaunchModeBuildItem;
 import io.quarkus.deployment.builditem.ShutdownContextBuildItem;
 import io.quarkus.deployment.dev.testing.TestRunResults;
 import io.quarkus.deployment.dev.testing.TestSupport;
-import io.quarkus.dev.console.DevConsoleManager;
 import io.quarkus.dev.spi.DevModeType;
+import io.quarkus.dev.testing.results.TestRunResultsInterface;
 import io.quarkus.devui.deployment.InternalPageBuildItem;
 import io.quarkus.devui.runtime.continuoustesting.ContinuousTestingJsonRPCService;
 import io.quarkus.devui.runtime.continuoustesting.ContinuousTestingRecorder;
 import io.quarkus.devui.spi.JsonRPCProvidersBuildItem;
+import io.quarkus.devui.spi.buildtime.BuildTimeActionBuildItem;
 import io.quarkus.devui.spi.page.Page;
 
 /**
@@ -28,7 +30,7 @@ import io.quarkus.devui.spi.page.Page;
 public class ContinuousTestingProcessor {
 
     @Record(ExecutionTime.RUNTIME_INIT)
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     public void continuousTestingState(
             ContinuousTestingRecorder recorder,
             LaunchModeBuildItem launchModeBuildItem,
@@ -47,10 +49,11 @@ public class ContinuousTestingProcessor {
 
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     InternalPageBuildItem createContinuousTestingPages() {
 
-        InternalPageBuildItem continuousTestingPages = new InternalPageBuildItem("Continuous Testing", 30);
+        InternalPageBuildItem continuousTestingPages = new InternalPageBuildItem("Continuous Testing", 30,
+                "qwc-continuous-testing-menu-action");
 
         continuousTestingPages.addPage(Page.webComponentPageBuilder()
                 .namespace(NAMESPACE)
@@ -62,17 +65,25 @@ public class ContinuousTestingProcessor {
 
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
-    JsonRPCProvidersBuildItem createJsonRPCService(LaunchModeBuildItem launchModeBuildItem) {
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
+    void registerBuildTimeActions(LaunchModeBuildItem launchModeBuildItem,
+            BuildProducer<BuildTimeActionBuildItem> buildTimeActionProducer) {
 
-        registerStartMethod(launchModeBuildItem);
-        registerStopMethod(launchModeBuildItem);
-        registerRunAllMethod(launchModeBuildItem);
-        registerRunFailedMethod(launchModeBuildItem);
-        registerToggleBrokenOnlyMethod(launchModeBuildItem);
-        registerToggleInstrumentationMethod(launchModeBuildItem);
-        registerGetResultsMethod(launchModeBuildItem);
-        registerGetStatusMethod(launchModeBuildItem);
+        BuildTimeActionBuildItem actions = new BuildTimeActionBuildItem(NAMESPACE);
+
+        registerStartMethod(launchModeBuildItem, actions);
+        registerStopMethod(launchModeBuildItem, actions);
+        registerRunAllMethod(launchModeBuildItem, actions);
+        registerRunFailedMethod(launchModeBuildItem, actions);
+        registerToggleBrokenOnlyMethod(launchModeBuildItem, actions);
+        registerToggleInstrumentationMethod(launchModeBuildItem, actions);
+        registerGetResultsMethod(launchModeBuildItem, actions);
+        registerGetStatusMethod(launchModeBuildItem, actions);
+        buildTimeActionProducer.produce(actions);
+    }
+
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
+    JsonRPCProvidersBuildItem createJsonRPCService() {
         return new JsonRPCProvidersBuildItem(NAMESPACE, ContinuousTestingJsonRPCService.class);
     }
 
@@ -80,8 +91,8 @@ public class ContinuousTestingProcessor {
         return ts.isEmpty() || launchModeBuildItem.getDevModeType().orElse(null) != DevModeType.LOCAL;
     }
 
-    private void registerStartMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "start", ignored -> {
+    private void registerStartMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("start", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -102,8 +113,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerStopMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "stop", ignored -> {
+    private void registerStopMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("stop", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -124,8 +135,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerRunAllMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "runAll", ignored -> {
+    private void registerRunAllMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("runAll", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -141,8 +152,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerRunFailedMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "runFailed", ignored -> {
+    private void registerRunFailedMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("runFailed", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -158,8 +169,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerToggleBrokenOnlyMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "toggleBrokenOnly", ignored -> {
+    private void registerToggleBrokenOnlyMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("toggleBrokenOnly", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -174,8 +185,9 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerToggleInstrumentationMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "toggleInstrumentation", ignored -> {
+    private void registerToggleInstrumentationMethod(LaunchModeBuildItem launchModeBuildItem,
+            BuildTimeActionBuildItem actions) {
+        actions.addAction("toggleInstrumentation", ignored -> {
 
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
@@ -190,8 +202,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerGetStatusMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "getStatus", ignored -> {
+    private void registerGetStatusMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.addAction("getStatus", ignored -> {
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
                 if (testsDisabled(launchModeBuildItem, ts)) {
@@ -228,8 +240,8 @@ public class ContinuousTestingProcessor {
         });
     }
 
-    private void registerGetResultsMethod(LaunchModeBuildItem launchModeBuildItem) {
-        DevConsoleManager.register(NAMESPACE + DASH + "getResults", ignored -> {
+    private void registerGetResultsMethod(LaunchModeBuildItem launchModeBuildItem, BuildTimeActionBuildItem actions) {
+        actions.<TestRunResultsInterface> addAction("getResults", ignored -> {
             try {
                 Optional<TestSupport> ts = TestSupport.instance();
                 if (testsDisabled(launchModeBuildItem, ts)) {
@@ -251,6 +263,4 @@ public class ContinuousTestingProcessor {
     }
 
     private static final String NAMESPACE = "devui-continuous-testing";
-    private static final String DASH = "-";
-
 }

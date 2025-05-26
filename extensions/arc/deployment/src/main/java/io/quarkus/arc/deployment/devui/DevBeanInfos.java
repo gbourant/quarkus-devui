@@ -90,9 +90,13 @@ public class DevBeanInfos {
     }
 
     public DependencyGraph getDependencyGraph(String beanId) {
+        // Note that MAX_DEPENDENCY_LEVEL is not implemented in UI yet
         Integer maxLevel = DevConsoleManager.getGlobal(MAX_DEPENDENCY_LEVEL);
         if (maxLevel == null) {
             maxLevel = DEFAULT_MAX_DEPENDENCY_LEVEL;
+        }
+        if (dependencyGraphs.isEmpty()) {
+            return DependencyGraph.EMPTY;
         }
         DependencyGraph graph = dependencyGraphs.get(beanId);
         return graph.maxLevel <= maxLevel ? graph : graph.forLevel(maxLevel);

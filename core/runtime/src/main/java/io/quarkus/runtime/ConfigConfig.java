@@ -4,12 +4,16 @@ import java.net.URI;
 import java.util.List;
 import java.util.Optional;
 
+import io.quarkus.runtime.annotations.ConfigDocPrefix;
 import io.quarkus.runtime.annotations.ConfigPhase;
 import io.quarkus.runtime.annotations.ConfigRoot;
 import io.smallrye.config.ConfigMapping;
+import io.smallrye.config.WithDefault;
 import io.smallrye.config.WithName;
 
 /**
+ * Configuration.
+ * <p>
  * We don't really use this, because these are configurations for the config itself, so it causes a chicken / egg
  * problem, but we need it for documentation purposes.
  * <br>
@@ -18,11 +22,12 @@ import io.smallrye.config.WithName;
  */
 @ConfigMapping(prefix = "quarkus")
 @ConfigRoot(phase = ConfigPhase.RUN_TIME)
+@ConfigDocPrefix("quarkus.config")
 public interface ConfigConfig {
     /**
-     * Profile that will be active when Quarkus launches.
+     * A comma separated list of profiles that will be active when Quarkus launches.
      */
-    Optional<String> profile();
+    Optional<List<String>> profile();
 
     /**
      * Accepts a single configuration profile name. If a configuration property cannot be found in the current active
@@ -55,10 +60,22 @@ public interface ConfigConfig {
     Optional<Boolean> logValues();
 
     /**
-     * A property that allows accessing a generated UUID.
-     * It generates that UUID at startup time. So it changes between two starts including in dev mode.
-     * <br>
-     * Access this generated UUID using expressions: `${quarkus.uuid}`.
+     * What should happen if the application is started with a different build time configuration than it was compiled
+     * against. This may be useful to prevent misconfiguration.
+     * <p>
+     * If this is set to {@code warn} the application will warn at start up.
+     * <p>
+     * If this is set to {@code fail} the application will fail at start up.
+     * <p>
+     * Native tests leveraging<code>@io.quarkus.test.junit.TestProfile</code> are always run with
+     * {@code quarkus.config.build-time-mismatch-at-runtime = fail}.
      */
-    Optional<String> uuid();
+    @WithName("config.build-time-mismatch-at-runtime")
+    @WithDefault("warn")
+    BuildTimeMismatchAtRuntime buildTimeMismatchAtRuntime();
+
+    enum BuildTimeMismatchAtRuntime {
+        warn,
+        fail
+    }
 }

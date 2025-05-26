@@ -1,7 +1,8 @@
 package io.quarkus.deployment.pkg.steps;
 
-import static io.quarkus.deployment.pkg.steps.GraalVM.Distribution.GRAALVM;
-import static io.quarkus.deployment.pkg.steps.GraalVM.Distribution.MANDREL;
+import static io.quarkus.runtime.graal.GraalVM.Distribution.GRAALVM;
+import static io.quarkus.runtime.graal.GraalVM.Distribution.LIBERICA;
+import static io.quarkus.runtime.graal.GraalVM.Distribution.MANDREL;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.stream.Stream;
@@ -12,8 +13,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import io.quarkus.deployment.builditem.nativeimage.NativeMinimalJavaVersionBuildItem;
-import io.quarkus.deployment.pkg.steps.GraalVM.Distribution;
 import io.quarkus.deployment.pkg.steps.GraalVM.Version;
+import io.quarkus.runtime.graal.GraalVM.Distribution;
 
 public class GraalVMTest {
 
@@ -63,6 +64,16 @@ public class GraalVMTest {
                         + "GraalVM Runtime Environment GraalVM CE (build 20+34-jvmci-23.0-b10)\n"
                         + "Substrate VM GraalVM CE (build 20+34, serial gc)").split("\\n"))));
 
+        // Should also work for other unknown implementations of GraalVM
+        assertVersion(new Version("GraalVM 23.0", "23.0", GRAALVM), GRAALVM,
+                Version.of(Stream.of(("native-image 20 2023-07-30\n"
+                        + "Foo Runtime Environment whatever (build 20+34-jvmci-23.0-b7)\n"
+                        + "Foo VM whatever (build 20+34, serial gc)").split("\\n"))));
+        assertVersion(new Version("GraalVM 23.0", "23.0", GRAALVM), GRAALVM,
+                Version.of(Stream.of(("native-image 20 2023-07-30\n"
+                        + "Another Runtime Environment whatever (build 20+34-jvmci-23.0-b7)\n"
+                        + "Another VM whatever (build 20+34, serial gc)").split("\\n"))));
+
         // Older version parsing
         assertVersion(new Version("GraalVM 20.1", "20.1", GRAALVM), GRAALVM,
                 Version.of(Stream.of("GraalVM Version 20.1.0 (Java Version 11.0.7)")));
@@ -88,10 +99,19 @@ public class GraalVMTest {
 
     static void assertVersion(Version graalVmVersion, Distribution distro, Version version) {
         assertThat(graalVmVersion.compareTo(version)).isEqualTo(0);
-        assertThat(version.distribution).isEqualTo(distro);
-        if (distro == MANDREL) {
-            assertThat(version.isMandrel()).isTrue();
-        }
+        assertThat(version.toString()).contains(distro.name());
+    }
+
+    @Test
+    public void testGraalVM21LibericaVersionParser() {
+        Version graalVM21Dev = Version.of(Stream.of(("native-image 21.0.1 2023-10-17\n"
+                + "GraalVM Runtime Environment Liberica-NIK-23.1.1-1 (build 21.0.1+12-LTS)\n"
+                + "Substrate VM Liberica-NIK-23.1.1-1 (build 21.0.1+12-LTS, serial gc)").split("\\n")));
+        assertThat(graalVM21Dev.toString()).contains(LIBERICA.name());
+        assertThat(graalVM21Dev.getVersionAsString()).isEqualTo("23.1.1");
+        assertThat(graalVM21Dev.javaVersion.toString()).isEqualTo("21.0.1+12-LTS");
+        assertThat(graalVM21Dev.javaVersion.feature()).isEqualTo(21);
+        assertThat(graalVM21Dev.javaVersion.update()).isEqualTo(1);
     }
 
     @Test
@@ -99,7 +119,7 @@ public class GraalVMTest {
         Version graalVM21Dev = Version.of(Stream.of(("native-image 21 2023-09-19\n"
                 + "GraalVM Runtime Environment GraalVM CE 21+35.1 (build 21+35-jvmci-23.1-b15)\n"
                 + "Substrate VM GraalVM CE 21+35.1 (build 21+35, serial gc)").split("\\n")));
-        assertThat(graalVM21Dev.distribution.name()).isEqualTo("GRAALVM");
+        assertThat(graalVM21Dev.toString()).contains(GRAALVM.name());
         assertThat(graalVM21Dev.getVersionAsString()).isEqualTo("23.1");
         assertThat(graalVM21Dev.javaVersion.toString()).isEqualTo("21+35-jvmci-23.1-b15");
         assertThat(graalVM21Dev.javaVersion.feature()).isEqualTo(21);
@@ -111,7 +131,7 @@ public class GraalVMTest {
         Version graalVM21Dev = Version.of(Stream.of(("native-image 21 2023-09-19\n" +
                 "GraalVM Runtime Environment GraalVM CE 21-dev+35.1 (build 21+35-jvmci-23.1-b14)\n" +
                 "Substrate VM GraalVM CE 21-dev+35.1 (build 21+35, serial gc)").split("\\n")));
-        assertThat(graalVM21Dev.distribution.name()).isEqualTo("GRAALVM");
+        assertThat(graalVM21Dev.toString()).contains(GRAALVM.name());
         assertThat(graalVM21Dev.getVersionAsString()).isEqualTo("23.1-dev");
         assertThat(graalVM21Dev.javaVersion.toString()).isEqualTo("21+35-jvmci-23.1-b14");
         assertThat(graalVM21Dev.javaVersion.feature()).isEqualTo(21);
@@ -123,11 +143,51 @@ public class GraalVMTest {
         Version graalVM22Dev = Version.of(Stream.of(("native-image 22 2024-03-19\n"
                 + "GraalVM Runtime Environment GraalVM CE 22-dev+16.1 (build 22+16-jvmci-b01)\n"
                 + "Substrate VM GraalVM CE 22-dev+16.1 (build 22+16, serial gc)").split("\\n")));
-        assertThat(graalVM22Dev.distribution.name()).isEqualTo("GRAALVM");
+        assertThat(graalVM22Dev.toString()).contains(GRAALVM.name());
         assertThat(graalVM22Dev.getVersionAsString()).isEqualTo("24.0-dev");
         assertThat(graalVM22Dev.javaVersion.toString()).isEqualTo("22+16-jvmci-b01");
         assertThat(graalVM22Dev.javaVersion.feature()).isEqualTo(22);
         assertThat(graalVM22Dev.javaVersion.update()).isEqualTo(0);
+    }
+
+    @Test
+    public void testGraalVMEE22DevVersionParser() {
+        Version graalVMEE22Dev = Version.of(Stream.of(("native-image 22 2024-03-19\n"
+                + "Java(TM) SE Runtime Environment Oracle GraalVM 22-dev+25.1 (build 22+25-jvmci-b01)\n"
+                + "Java HotSpot(TM) 64-Bit Server VM Oracle GraalVM 22-dev+25.1 (build 22+25-jvmci-b01, mixed mode, sharing)")
+                .split("\\n")));
+        assertThat(graalVMEE22Dev.toString()).contains(GRAALVM.name());
+        assertThat(graalVMEE22Dev.getVersionAsString()).isEqualTo("24.0-dev");
+        assertThat(graalVMEE22Dev.javaVersion.toString()).isEqualTo("22+25-jvmci-b01");
+        assertThat(graalVMEE22Dev.javaVersion.feature()).isEqualTo(22);
+        assertThat(graalVMEE22Dev.javaVersion.update()).isEqualTo(0);
+    }
+
+    @Test
+    public void testGraalVMEA24DevVersionParser() {
+        final Version graalVMEA24Dev = Version.of(Stream.of(("native-image 24-ea 2025-03-18\n"
+                + "OpenJDK Runtime Environment Oracle GraalVM 24-dev.ea+10.1 (build 24-ea+10-1076)\n"
+                + "OpenJDK 64-Bit Server VM Oracle GraalVM 24-dev.ea+10.1 (build 24-ea+10-1076, mixed mode, sharing)")
+                .split("\\n")));
+        assertThat(graalVMEA24Dev.toString()).contains(GRAALVM.name());
+        assertThat(graalVMEA24Dev.getVersionAsString()).isEqualTo("24.2-dev");
+        assertThat(graalVMEA24Dev.javaVersion.toString()).isEqualTo("24-ea+10-1076");
+        assertThat(graalVMEA24Dev.javaVersion.feature()).isEqualTo(24);
+        assertThat(graalVMEA24Dev.javaVersion.update()).isEqualTo(0);
+    }
+
+    @Test
+    public void testGraalVM23_1CommunityVersionParser() {
+        final Version version = Version.of(Stream.of(("native-image 21.0.5-beta 2024-10-15\n"
+                + "GraalVM Runtime Environment GraalVM CE 21.0.5-dev.beta+3.1 (build 21.0.5-beta+3-ea)\n"
+                + "Substrate VM GraalVM CE 21.0.5-dev.beta+3.1 (build 21.0.5-beta+3-ea, serial gc)")
+                .split("\\n")));
+        assertThat(version.toString().contains(GRAALVM.name()));
+        assertThat(version.getVersionAsString()).isEqualTo("23.1-dev");
+        assertThat(version.javaVersion.toString()).isEqualTo("21.0.5-beta+3-ea");
+        assertThat(version.javaVersion.feature()).isEqualTo(21);
+        assertThat(version.javaVersion.interim()).isEqualTo(0);
+        assertThat(version.javaVersion.update()).isEqualTo(5);
     }
 
     @Test

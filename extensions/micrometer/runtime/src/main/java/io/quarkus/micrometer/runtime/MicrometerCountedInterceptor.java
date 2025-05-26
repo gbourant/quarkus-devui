@@ -24,7 +24,7 @@ import io.smallrye.mutiny.tuples.Functions;
  * @see Counted
  */
 @Interceptor
-@MicrometerCounted
+@Counted
 @Priority(Interceptor.Priority.LIBRARY_BEFORE + 10)
 public class MicrometerCountedInterceptor {
 
@@ -32,9 +32,11 @@ public class MicrometerCountedInterceptor {
     public final String RESULT_TAG_SUCCESS_VALUE = "success";
 
     private final MeterRegistry meterRegistry;
+    private final MeterTagsSupport meterTagsSupport;
 
-    public MicrometerCountedInterceptor(MeterRegistry meterRegistry) {
+    public MicrometerCountedInterceptor(MeterRegistry meterRegistry, MeterTagsSupport meterTagsSupport) {
         this.meterRegistry = meterRegistry;
+        this.meterTagsSupport = meterTagsSupport;
     }
 
     /**
@@ -56,12 +58,12 @@ public class MicrometerCountedInterceptor {
     @AroundInvoke
     @SuppressWarnings("unchecked")
     Object countedMethod(ArcInvocationContext context) throws Exception {
-        MicrometerCounted counted = context.findIterceptorBinding(MicrometerCounted.class);
+        Counted counted = context.findIterceptorBinding(Counted.class);
         if (counted == null) {
             return context.proceed();
         }
         Method method = context.getMethod();
-        Tags commonTags = getCommonTags(method.getDeclaringClass().getName(), method.getName());
+        Tags tags = meterTagsSupport.getTags(context);
 
         Class<?> returnType = method.getReturnType();
         if (TypesUtil.isCompletionStage(returnType)) {
@@ -69,11 +71,11 @@ public class MicrometerCountedInterceptor {
                 return ((CompletionStage<?>) context.proceed()).whenComplete(new BiConsumer<Object, Throwable>() {
                     @Override
                     public void accept(Object o, Throwable throwable) {
-                        recordCompletionResult(counted, commonTags, throwable);
+                        recordCompletionResult(counted, tags, throwable);
                     }
                 });
             } catch (Throwable e) {
-                record(counted, commonTags, e);
+                record(counted, tags, e);
             }
         } else if (TypesUtil.isUni(returnType)) {
             try {
@@ -81,27 +83,27 @@ public class MicrometerCountedInterceptor {
                         new Functions.TriConsumer<>() {
                             @Override
                             public void accept(Object o, Throwable throwable, Boolean cancelled) {
-                                recordCompletionResult(counted, commonTags, throwable);
+                                recordCompletionResult(counted, tags, throwable);
                             }
                         });
             } catch (Throwable e) {
-                record(counted, commonTags, e);
+                record(counted, tags, e);
             }
         }
 
         try {
             Object result = context.proceed();
             if (!counted.recordFailuresOnly()) {
-                record(counted, commonTags, null);
+                record(counted, tags, null);
             }
             return result;
         } catch (Throwable e) {
-            record(counted, commonTags, e);
+            record(counted, tags, e);
             throw e;
         }
     }
 
-    private void recordCompletionResult(MicrometerCounted counted, Tags commonTags, Throwable throwable) {
+    private void recordCompletionResult(Counted counted, Tags commonTags, Throwable throwable) {
         if (throwable != null) {
             record(counted, commonTags, throwable);
         } else if (!counted.recordFailuresOnly()) {
@@ -109,7 +111,7 @@ public class MicrometerCountedInterceptor {
         }
     }
 
-    private void record(MicrometerCounted counted, Tags commonTags, Throwable throwable) {
+    private void record(Counted counted, Tags commonTags, Throwable throwable) {
         Counter.Builder builder = Counter.builder(counted.value())
                 .tags(commonTags)
                 .tags(counted.extraTags())
@@ -120,10 +122,6 @@ public class MicrometerCountedInterceptor {
             builder.description(description);
         }
         builder.register(meterRegistry).increment();
-    }
-
-    private Tags getCommonTags(String className, String methodName) {
-        return Tags.of("class", className, "method", methodName);
     }
 
 }

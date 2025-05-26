@@ -44,12 +44,11 @@ import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.GeneratedFileSystemResourceBuildItem;
 import io.quarkus.deployment.builditem.LaunchModeBuildItem;
 import io.quarkus.deployment.pkg.PackageConfig;
-import io.quarkus.deployment.pkg.builditem.LegacyJarRequiredBuildItem;
 import io.quarkus.deployment.pkg.builditem.OutputTargetBuildItem;
-import io.quarkus.deployment.pkg.builditem.UberJarRequiredBuildItem;
 import io.quarkus.deployment.util.FileUtil;
 import io.quarkus.kubernetes.spi.ConfigurationSupplierBuildItem;
 import io.quarkus.kubernetes.spi.ConfiguratorBuildItem;
+import io.quarkus.kubernetes.spi.CustomKubernetesOutputDirBuildItem;
 import io.quarkus.kubernetes.spi.CustomProjectRootBuildItem;
 import io.quarkus.kubernetes.spi.DecoratorBuildItem;
 import io.quarkus.kubernetes.spi.DekorateOutputBuildItem;
@@ -79,9 +78,10 @@ class KubernetesProcessor {
         List<DeploymentTargetEntry> entries = new ArrayList<>(mergedDeploymentTargets.size());
         for (KubernetesDeploymentTargetBuildItem deploymentTarget : mergedDeploymentTargets) {
             if (deploymentTarget.isEnabled()) {
-                entries.add(new DeploymentTargetEntry(deploymentTarget.getName(),
-                        deploymentTarget.getKind(), deploymentTarget.getPriority(),
-                        deploymentTarget.getDeployStrategy()));
+                DeploymentResourceKind deploymentResourceKind = DeploymentResourceKind.find(deploymentTarget.getGroup(),
+                        deploymentTarget.getVersion(), deploymentTarget.getKind());
+                entries.add(new DeploymentTargetEntry(deploymentTarget.getName(), deploymentResourceKind,
+                        deploymentTarget.getPriority(), deploymentTarget.getDeployStrategy()));
             }
         }
         return new EnabledKubernetesDeploymentTargetsBuildItem(entries);
@@ -98,11 +98,9 @@ class KubernetesProcessor {
     @BuildStep(onlyIfNot = IsTest.class)
     public void build(ApplicationInfoBuildItem applicationInfo,
             OutputTargetBuildItem outputTarget,
-            List<UberJarRequiredBuildItem> uberJarRequired,
-            List<LegacyJarRequiredBuildItem> legacyJarRequired,
             PackageConfig packageConfig,
             KubernetesConfig kubernetesConfig,
-            OpenshiftConfig openshiftConfig,
+            OpenShiftConfig openshiftConfig,
             KnativeConfig knativeConfig,
             Capabilities capabilities,
             LaunchModeBuildItem launchMode,
@@ -113,6 +111,7 @@ class KubernetesProcessor {
             List<DecoratorBuildItem> decorators,
             BuildProducer<DekorateOutputBuildItem> dekorateSessionProducer,
             Optional<CustomProjectRootBuildItem> customProjectRoot,
+            Optional<CustomKubernetesOutputDirBuildItem> customOutputDir,
             BuildProducer<GeneratedFileSystemResourceBuildItem> generatedResourceProducer,
             BuildProducer<GeneratedKubernetesResourceBuildItem> generatedKubernetesResourceProducer,
             BuildProducer<KubernetesOutputDirectoryBuildItem> outputDirectoryBuildItemBuildProducer) {
@@ -133,7 +132,7 @@ class KubernetesProcessor {
                 .map(DeploymentTargetEntry::getName)
                 .collect(Collectors.toSet());
 
-        Path artifactPath = getRunner(outputTarget, packageConfig, uberJarRequired, legacyJarRequired);
+        Path artifactPath = getRunner(outputTarget, packageConfig);
 
         try {
             // by passing false to SimpleFileWriter, we ensure that no files are actually written during this phase
@@ -185,8 +184,13 @@ class KubernetesProcessor {
                     }
                 });
 
-                Path targetDirectory = getEffectiveOutputDirectory(kubernetesConfig, project.getRoot(),
-                        outputTarget.getOutputDirectory());
+                //The targetDirectory should be the custom if provided, oterwise the 'default' output directory.
+                //I this case 'default' means that one that we used until now (up until we introduced the ability to override).
+                Path targetDirectory = customOutputDir
+                        .map(c -> c.getOutputDir())
+                        .map(d -> d.isAbsolute() ? d : project.getRoot().resolve(d))
+                        .orElseGet(() -> getEffectiveOutputDirectory(kubernetesConfig, project.getRoot(),
+                                outputTarget.getOutputDirectory()));
 
                 outputDirectoryBuildItemBuildProducer.produce(new KubernetesOutputDirectoryBuildItem(targetDirectory));
 
@@ -260,27 +264,24 @@ class KubernetesProcessor {
      * https://github.com/quarkusio/quarkus/pull/20113).
      */
     private Path getRunner(OutputTargetBuildItem outputTarget,
-            PackageConfig packageConfig,
-            List<UberJarRequiredBuildItem> uberJarRequired,
-            List<LegacyJarRequiredBuildItem> legacyJarRequired) {
-        if (!legacyJarRequired.isEmpty() || packageConfig.isLegacyJar()
-                || !uberJarRequired.isEmpty()
-                || packageConfig.type.equalsIgnoreCase(PackageConfig.BuiltInType.UBER_JAR.getValue())) {
-            // the jar is a legacy jar or uber jar, the next logic applies:
-            return outputTarget.getOutputDirectory()
-                    .resolve(outputTarget.getBaseName() + packageConfig.getRunnerSuffix() + ".jar");
-        }
+            PackageConfig packageConfig) {
+        PackageConfig.JarConfig.JarType jarType = packageConfig.jar().type();
+        return switch (jarType) {
+            case LEGACY_JAR, UBER_JAR -> outputTarget.getOutputDirectory()
+                    .resolve(outputTarget.getBaseName() + packageConfig.computedRunnerSuffix() + ".jar");
+            case FAST_JAR, MUTABLE_JAR -> {
+                //thin JAR
+                Path buildDir;
 
-        // otherwise, it's a thin jar:
-        Path buildDir;
+                if (packageConfig.outputDirectory().isPresent()) {
+                    buildDir = outputTarget.getOutputDirectory();
+                } else {
+                    buildDir = outputTarget.getOutputDirectory().resolve(DEFAULT_FAST_JAR_DIRECTORY_NAME);
+                }
 
-        if (packageConfig.outputDirectory.isPresent()) {
-            buildDir = outputTarget.getOutputDirectory();
-        } else {
-            buildDir = outputTarget.getOutputDirectory().resolve(DEFAULT_FAST_JAR_DIRECTORY_NAME);
-        }
-
-        return buildDir.resolve(QUARKUS_RUN_JAR);
+                yield buildDir.resolve(QUARKUS_RUN_JAR);
+            }
+        };
     }
 
     /**
@@ -294,7 +295,7 @@ class KubernetesProcessor {
      * @return the effective output directory.
      */
     private Path getEffectiveOutputDirectory(KubernetesConfig config, Path projectLocation, Path projectOutputDirectory) {
-        return config.outputDirectory.map(d -> projectLocation.resolve(d))
+        return config.outputDirectory().map(d -> projectLocation.resolve(d))
                 .orElse(projectOutputDirectory.resolve(KUBERNETES));
     }
 }

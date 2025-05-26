@@ -21,6 +21,7 @@ import jakarta.enterprise.inject.AmbiguousResolutionException;
 import jakarta.enterprise.inject.UnsatisfiedResolutionException;
 import jakarta.enterprise.inject.spi.DefinitionException;
 import jakarta.enterprise.inject.spi.DeploymentException;
+import jakarta.enterprise.inject.spi.InterceptionType;
 
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationTarget;
@@ -30,13 +31,18 @@ import org.jboss.jandex.DotName;
 import org.jboss.jandex.FieldInfo;
 import org.jboss.jandex.IndexView;
 import org.jboss.jandex.MethodInfo;
+import org.jboss.jandex.MethodParameterInfo;
+import org.jboss.jandex.ParameterizedType;
 import org.jboss.jandex.Type;
 import org.jboss.jandex.Type.Kind;
 import org.jboss.logging.Logger;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Opcodes;
 
+import io.quarkus.arc.processor.BeanDeployment.SkippedClass;
+import io.quarkus.arc.processor.BuiltinBean.ValidatorContext;
 import io.quarkus.arc.processor.InjectionPointInfo.TypeAndQualifiers;
+import io.quarkus.arc.processor.Types.TypeClosure;
 import io.quarkus.gizmo.ClassTransformer;
 import io.quarkus.gizmo.FieldDescriptor;
 import io.quarkus.gizmo.MethodCreator;
@@ -78,7 +84,7 @@ public final class Beans {
         return null;
     }
 
-    static BeanInfo createProducerMethod(Set<Type> beanTypes, MethodInfo producerMethod, BeanInfo declaringBean,
+    static BeanInfo createProducerMethod(TypeClosure typeClosure, MethodInfo producerMethod, BeanInfo declaringBean,
             BeanDeployment beanDeployment,
             DisposerInfo disposer, InjectionPointModifier transformer) {
         Set<AnnotationInstance> qualifiers = new HashSet<>();
@@ -188,10 +194,36 @@ public final class Beans {
                     + "its scope must be @Dependent: " + producerMethod);
         }
 
+        InterceptionProxyInfo interceptionProxy = null;
+        for (MethodParameterInfo parameter : producerMethod.parameters()) {
+            if (parameter.type().name().equals(DotNames.INTERCEPTION_PROXY)) {
+                if (interceptionProxy != null) {
+                    throw new DefinitionException(
+                            "Declaring more than one InterceptionProxy parameter is invalid: " + producerMethod);
+                }
+                if (parameter.type().kind() != Kind.PARAMETERIZED_TYPE) {
+                    throw new DefinitionException(
+                            "InterceptionProxy parameter must be a parameterized type: " + producerMethod);
+                }
+                DotName targetClass = producerMethod.returnType().name();
+                DotName bindingsSource = null;
+                if (parameter.hasAnnotation(DotNames.BINDINGS_SOURCE)) {
+                    Type bindingsSourceType = parameter.annotation(DotNames.BINDINGS_SOURCE).value().asClass();
+                    if (bindingsSourceType.kind() != Kind.CLASS) {
+                        throw new DefinitionException("@BindingsSource may only define a class type, got "
+                                + bindingsSourceType.kind() + ": " + producerMethod);
+                    }
+                    bindingsSource = bindingsSourceType.name();
+                }
+                interceptionProxy = new InterceptionProxyInfo(targetClass, bindingsSource);
+            }
+        }
+
         List<Injection> injections = Injection.forBean(producerMethod, declaringBean, beanDeployment, transformer,
                 Injection.BeanType.PRODUCER_METHOD);
-        BeanInfo bean = new BeanInfo(producerMethod, beanDeployment, scope, beanTypes, qualifiers, injections, declaringBean,
-                disposer, isAlternative, stereotypes, name, isDefaultBean, null, priority);
+        BeanInfo bean = new BeanInfo(producerMethod, beanDeployment, scope, typeClosure.types(), qualifiers, injections,
+                declaringBean, disposer, isAlternative, stereotypes, name, isDefaultBean, null, priority,
+                typeClosure.unrestrictedTypes(), interceptionProxy);
         for (Injection injection : injections) {
             injection.init(bean);
         }
@@ -202,7 +234,7 @@ public final class Beans {
             DisposerInfo disposer) {
         Set<AnnotationInstance> qualifiers = new HashSet<>();
         List<ScopeInfo> scopes = new ArrayList<>();
-        Set<Type> types = Types.getProducerFieldTypeClosure(producerField, beanDeployment);
+        TypeClosure typeClosure = Types.getProducerFieldTypeClosure(producerField, beanDeployment);
         Integer priority = null;
         boolean isAlternative = false;
         boolean isDefaultBean = false;
@@ -302,8 +334,10 @@ public final class Beans {
                     + "its scope must be @Dependent: " + producerField);
         }
 
-        BeanInfo bean = new BeanInfo(producerField, beanDeployment, scope, types, qualifiers, Collections.emptyList(),
-                declaringBean, disposer, isAlternative, stereotypes, name, isDefaultBean, null, priority);
+        BeanInfo bean = new BeanInfo(producerField, beanDeployment, scope, typeClosure.types(), qualifiers,
+                Collections.emptyList(),
+                declaringBean, disposer, isAlternative, stereotypes, name, isDefaultBean, null, priority,
+                typeClosure.unrestrictedTypes(), null);
         return bean;
     }
 
@@ -453,28 +487,63 @@ public final class Beans {
         }
         BuiltinBean builtinBean = BuiltinBean.resolve(injectionPoint);
         if (builtinBean != null) {
-            builtinBean.validate(target, injectionPoint, errors::add);
+            builtinBean.getValidator().validate(new ValidatorContext(deployment, target, injectionPoint, errors::add));
             // Skip built-in beans
             return;
         }
         List<BeanInfo> resolved = deployment.beanResolver.resolve(injectionPoint.getTypeAndQualifiers());
         BeanInfo selected = null;
         if (resolved.isEmpty()) {
-            List<BeanInfo> typeMatching = deployment.beanResolver.findTypeMatching(injectionPoint.getRequiredType());
 
             StringBuilder message = new StringBuilder("Unsatisfied dependency for type ");
             addStandardErroneousDependencyMessage(target, injectionPoint, message);
+
+            List<BeanInfo> typeMatching = deployment.beanResolver.findTypeMatching(injectionPoint.getRequiredType());
             if (!typeMatching.isEmpty()) {
-                message.append("\n\tThe following beans match by type, but none have matching qualifiers:");
-                for (BeanInfo beanInfo : typeMatching) {
-                    message.append("\n\t\t- ");
-                    message.append("Bean [class=");
-                    message.append(beanInfo.getImplClazz());
-                    message.append(", qualifiers=");
-                    message.append(beanInfo.getQualifiers());
-                    message.append("]");
+                message.append("\n\tThe following beans match by type, but none has matching qualifiers:");
+                for (BeanInfo bean : typeMatching) {
+                    message.append("\n\t- ");
+                    message.append(bean);
                 }
+                message.append("\n\n");
             }
+
+            List<BeanInfo> unrestrictedTypeMatching = deployment.beanResolver
+                    .findUnrestrictedTypeMatching(injectionPoint.getTypeAndQualifiers());
+            if (!unrestrictedTypeMatching.isEmpty()) {
+                message.append("\n\tThe following beans match by type excluded by the @Typed annotation:");
+                for (BeanInfo bean : unrestrictedTypeMatching) {
+                    message.append("\n\t- ");
+                    message.append(bean);
+                }
+                message.append("\n\n");
+            }
+
+            List<SkippedClass> skippedClasses = deployment.findSkippedClassesMatching(injectionPoint.getRequiredType());
+            if (!skippedClasses.isEmpty()) {
+                message.append("\n\tThe following classes match by type, but have been skipped during discovery:");
+                for (SkippedClass skippedClass : skippedClasses) {
+                    message.append("\n\t- ");
+                    message.append(skippedClass.clazz().name());
+                    switch (skippedClass.reason()) {
+                        case EXCLUDED_TYPE:
+                            message.append(" was excluded in config");
+                            break;
+                        case VETOED:
+                            message.append(" was annotated with @Vetoed");
+                            break;
+                        case NO_BEAN_DEF_ANNOTATION:
+                            message.append(" has no bean defining annotation (scope, stereotype, etc.)");
+                            break;
+                        case NO_BEAN_CONSTRUCTOR:
+                            message.append(" does not declare a valid bean constructor");
+                        default:
+                            break;
+                    }
+                }
+                message.append("\n\n");
+            }
+
             errors.add(new UnsatisfiedResolutionException(message.toString()));
         } else if (resolved.size() > 1) {
             // Try to resolve the ambiguity
@@ -502,7 +571,7 @@ public final class Beans {
         if (injectionPoint.isSynthetic()) {
             message.append("\n\t- synthetic injection point");
         } else {
-            message.append("\n\t- java member: ");
+            message.append("\n\t- injection target: ");
             message.append(injectionPoint.getTargetInfo());
         }
         message.append("\n\t- declared on ");
@@ -564,9 +633,9 @@ public final class Beans {
     }
 
     private static Integer getAlternativePriority(BeanInfo bean) {
-        Integer beanPriority = bean.getAlternativePriority();
+        Integer beanPriority = bean.getPriority();
         if (beanPriority == null && bean.getDeclaringBean() != null) {
-            beanPriority = bean.getDeclaringBean().getAlternativePriority();
+            beanPriority = bean.getDeclaringBean().getPriority();
         }
         return beanPriority;
     }
@@ -575,14 +644,14 @@ public final class Beans {
         // The highest priority wins
         Integer priority1, priority2;
 
-        priority2 = bean2.getAlternativePriority();
+        priority2 = bean2.getPriority();
         if (priority2 == null) {
-            priority2 = bean2.getDeclaringBean().getAlternativePriority();
+            priority2 = bean2.getDeclaringBean().getPriority();
         }
 
-        priority1 = bean1.getAlternativePriority();
+        priority1 = bean1.getPriority();
         if (priority1 == null) {
-            priority1 = bean1.getDeclaringBean().getAlternativePriority();
+            priority1 = bean1.getDeclaringBean().getPriority();
         }
 
         if (priority2 == null || priority1 == null) {
@@ -639,6 +708,12 @@ public final class Beans {
                     //as this is called in a tight loop we only do it if necessary
                     values = new ArrayList<>();
                     Set<String> nonBindingFields = beanDeployment.getQualifierNonbindingMembers(requiredQualifier.name());
+                    if (requiredClazz == null) {
+                        throw new IllegalStateException("Failed to find bean qualifier class with name "
+                                + requiredQualifier.name() + " in application index. Make sure the class is part of "
+                                + "the Jandex index. Classes that are not subject to discovery can be registered via "
+                                + "AdditionalBeanBuildItem and non-qualifier annotations can use QualifierRegistrarBuildItem");
+                    }
                     for (AnnotationValue val : requiredQualifier.valuesWithDefaults(beanDeployment.getBeanArchiveIndex())) {
                         if (!requiredClazz.method(val.name()).hasAnnotation(DotNames.NONBINDING)
                                 && !nonBindingFields.contains(val.name())) {
@@ -670,8 +745,17 @@ public final class Beans {
     }
 
     static List<MethodInfo> getCallbacks(ClassInfo beanClass, DotName annotation, IndexView index) {
+        InterceptionType interceptionType = null;
+        if (DotNames.POST_CONSTRUCT.equals(annotation)) {
+            interceptionType = InterceptionType.POST_CONSTRUCT;
+        } else if (DotNames.PRE_DESTROY.equals(annotation)) {
+            interceptionType = InterceptionType.PRE_DESTROY;
+        } else {
+            throw new IllegalArgumentException("Unexpected callback annotation: " + annotation);
+        }
+
         List<MethodInfo> callbacks = new ArrayList<>();
-        collectCallbacks(beanClass, callbacks, annotation, index, new HashSet<>());
+        collectCallbacks(beanClass, callbacks, annotation, index, new HashSet<>(), interceptionType);
         Collections.reverse(callbacks);
         return callbacks;
     }
@@ -689,7 +773,8 @@ public final class Beans {
                     continue;
                 }
                 if (store.hasAnnotation(method, DotNames.AROUND_INVOKE)) {
-                    InterceptorInfo.addInterceptorMethod(allMethods, methods, method);
+                    InterceptorInfo.addInterceptorMethod(allMethods, methods, method, InterceptionType.AROUND_INVOKE,
+                            InterceptorPlacement.TARGET_CLASS);
                     if (++aroundInvokesFound > 1) {
                         throw new DefinitionException(
                                 "Multiple @AroundInvoke interceptor methods declared on class: " + aClass);
@@ -732,15 +817,29 @@ public final class Beans {
                 }
             }
         }
+
+        if (bean.isDecorator()) {
+            DecoratorInfo decorator = (DecoratorInfo) bean;
+            for (InjectionPointInfo injectionPointInfo : bean.getAllInjectionPoints()) {
+                // the injection point is a field, an initializer method parameter or a bean constructor of a decorator,
+                // with qualifier @Decorated, then the type parameter of the injected Bean must be the same as the delegate type
+                if (injectionPointInfo.getRequiredType().name().equals(DotNames.BEAN)
+                        && injectionPointInfo.getRequiredQualifier(DotNames.DECORATED) != null
+                        && injectionPointInfo.getRequiredType().kind() == Type.Kind.PARAMETERIZED_TYPE) {
+                    ParameterizedType parameterizedType = injectionPointInfo.getRequiredType().asParameterizedType();
+                    if (parameterizedType.arguments().size() != 1
+                            || !parameterizedType.arguments().get(0).equals(decorator.getDelegateType())) {
+                        throw new DefinitionException(
+                                "Injected @Decorated Bean<> has to use the delegate type as its type parameter. " +
+                                        "Problematic injection point: " + injectionPointInfo.getTargetInfo());
+                    }
+                }
+            }
+        }
     }
 
     static void validateBean(BeanInfo bean, List<Throwable> errors, Consumer<BytecodeTransformer> bytecodeTransformerConsumer,
-            Set<DotName> classesReceivingNoArgsCtor, Set<BeanInfo> injectedBeans) {
-
-        // by default, we fail deployment due to unproxyability for all beans, but in strict mode,
-        // we only do that for beans that are injected somewhere -- and defer the error to runtime otherwise,
-        // due to CDI spec requirements
-        boolean failIfNotProxyable = bean.getDeployment().strictCompatibility ? injectedBeans.contains(bean) : true;
+            Set<DotName> classesReceivingNoArgsCtor, boolean failIfNotProxyable) {
 
         if (bean.isClassBean()) {
             ClassInfo beanClass = bean.getTarget().get().asClass();
@@ -749,7 +848,7 @@ public final class Beans {
                 classifier = "Intercepted";
                 failIfNotProxyable = true;
             }
-            if (Modifier.isFinal(beanClass.flags()) && classifier != null) {
+            if (beanClass.isFinal() && classifier != null) {
                 // Client proxies and subclasses require a non-final class
                 if (beanClass.isRecord()) {
                     errors.add(new DeploymentException(String.format(
@@ -763,6 +862,13 @@ public final class Beans {
                     bean.getDeployment().deferUnproxyableErrorToRuntime(bean);
                 }
             }
+            if (beanClass.isSealed() && classifier != null) {
+                if (failIfNotProxyable) {
+                    errors.add(new DeploymentException(String.format("%s bean must not be sealed: %s", classifier, bean)));
+                } else {
+                    bean.getDeployment().deferUnproxyableErrorToRuntime(bean);
+                }
+            }
             if (bean.getDeployment().strictCompatibility && classifier != null) {
                 validateNonStaticFinalMethods(bean, beanClass, bean.getDeployment().getBeanArchiveIndex(),
                         classifier, errors, failIfNotProxyable);
@@ -770,8 +876,9 @@ public final class Beans {
 
             MethodInfo noArgsConstructor = beanClass.method(Methods.INIT);
             // Note that spec also requires no-arg constructor for intercepted beans but intercepted subclasses should work fine with non-private @Inject
-            // constructors so we only validate normal scoped beans
-            if (bean.getScope().isNormal() && noArgsConstructor == null) {
+            // constructors, so we only validate normal scoped beans or intercepted beans without constructor injection
+            if ((bean.getScope().isNormal() || bean.isSubclassRequired() && bean.getConstructorInjection().isEmpty()
+                    && !bean.getImplClazz().isInterface()) && noArgsConstructor == null) {
                 if (bean.getDeployment().transformUnproxyableClasses) {
                     DotName superName = beanClass.superName();
                     if (!DotNames.OBJECT.equals(superName)) {
@@ -797,7 +904,7 @@ public final class Beans {
                     }
                 } else if (failIfNotProxyable) {
                     errors.add(new DeploymentException(String.format(
-                            "Normal scoped beans must declare a non-private constructor with no parameters: %s", bean)));
+                            "%s beans must declare a non-private constructor with no parameters: %s", classifier, bean)));
                 } else {
                     bean.getDeployment().deferUnproxyableErrorToRuntime(bean);
                 }
@@ -845,7 +952,7 @@ public final class Beans {
             ClassInfo returnTypeClass = getClassByName(bean.getDeployment().getBeanArchiveIndex(), type);
             // null for primitive or array types, but those are covered above
             if (returnTypeClass != null && bean.getScope().isNormal() && !Modifier.isInterface(returnTypeClass.flags())) {
-                if (Modifier.isFinal(returnTypeClass.flags())) {
+                if (returnTypeClass.isFinal()) {
                     if (returnTypeClass.isRecord()) {
                         errors.add(new DeploymentException(String.format(
                                 "%s must not have a type that is a record, because records are always final: %s",
@@ -905,6 +1012,14 @@ public final class Beans {
                     } else {
                         bean.getDeployment().deferUnproxyableErrorToRuntime(bean);
                     }
+                }
+            }
+            if (returnTypeClass != null && bean.getScope().isNormal() && returnTypeClass.isSealed()) {
+                if (failIfNotProxyable) {
+                    errors.add(new DeploymentException(
+                            String.format("%s must not have a return type that is sealed: %s", classifier, bean)));
+                } else {
+                    bean.getDeployment().deferUnproxyableErrorToRuntime(bean);
                 }
             }
         } else if (bean.isSynthetic()) {
@@ -1002,24 +1117,18 @@ public final class Beans {
     }
 
     private static void collectCallbacks(ClassInfo clazz, List<MethodInfo> callbacks, DotName annotation, IndexView index,
-            Set<String> knownMethods) {
+            Set<String> knownMethods, InterceptionType interceptionType) {
         for (MethodInfo method : clazz.methods()) {
             if (method.hasAnnotation(annotation) && !knownMethods.contains(method.name())) {
-                if (method.returnType().kind() == Kind.VOID && method.parameterTypes().isEmpty()) {
-                    callbacks.add(method);
-                } else {
-                    // invalid signature - build a meaningful message.
-                    throw new DefinitionException("Invalid signature for the method `" + method + "` from class `"
-                            + method.declaringClass() + "`. Methods annotated with `" + annotation + "` must return" +
-                            " `void` and cannot have parameters.");
-                }
+                InterceptorInfo.validateSignature(method, interceptionType, InterceptorPlacement.TARGET_CLASS);
+                callbacks.add(method);
             }
             knownMethods.add(method.name());
         }
         if (clazz.superName() != null) {
             ClassInfo superClass = getClassByName(index, clazz.superName());
             if (superClass != null) {
-                collectCallbacks(superClass, callbacks, annotation, index, knownMethods);
+                collectCallbacks(superClass, callbacks, annotation, index, knownMethods, interceptionType);
             }
         }
     }
@@ -1250,7 +1359,7 @@ public final class Beans {
         BeanInfo create() {
             Set<AnnotationInstance> qualifiers = new HashSet<>();
             List<ScopeInfo> scopes = new ArrayList<>();
-            Set<Type> types = Types.getClassBeanTypeClosure(beanClass, beanDeployment);
+            TypeClosure typeClosure = Types.getClassBeanTypeClosure(beanClass, beanDeployment);
 
             List<StereotypeInfo> stereotypes = new ArrayList<>();
             Collection<AnnotationInstance> annotations = beanDeployment.getAnnotations(beanClass);
@@ -1307,8 +1416,9 @@ public final class Beans {
 
             List<Injection> injections = Injection.forBean(beanClass, null, beanDeployment, transformer,
                     Injection.BeanType.MANAGED_BEAN);
-            BeanInfo bean = new BeanInfo(beanClass, beanDeployment, scope, types, qualifiers,
-                    injections, null, null, isAlternative, stereotypes, name, isDefaultBean, null, priority);
+            BeanInfo bean = new BeanInfo(beanClass, beanDeployment, scope, typeClosure.types(), qualifiers,
+                    injections, null, null, isAlternative, stereotypes, name, isDefaultBean, null, priority,
+                    typeClosure.unrestrictedTypes(), null);
             for (Injection injection : injections) {
                 injection.init(bean);
             }

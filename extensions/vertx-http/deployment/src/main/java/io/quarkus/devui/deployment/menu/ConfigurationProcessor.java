@@ -2,6 +2,7 @@ package io.quarkus.devui.deployment.menu;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -18,7 +20,7 @@ import java.util.stream.Collectors;
 import jakarta.inject.Singleton;
 
 import io.quarkus.arc.deployment.SyntheticBeanBuildItem;
-import io.quarkus.deployment.IsDevelopment;
+import io.quarkus.deployment.IsLocalDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
@@ -29,19 +31,20 @@ import io.quarkus.deployment.builditem.DevServicesLauncherConfigResultBuildItem;
 import io.quarkus.dev.config.CurrentConfig;
 import io.quarkus.dev.console.DevConsoleManager;
 import io.quarkus.devui.deployment.InternalPageBuildItem;
-import io.quarkus.devui.runtime.config.ConfigDescription;
 import io.quarkus.devui.runtime.config.ConfigDescriptionBean;
 import io.quarkus.devui.runtime.config.ConfigDevUIRecorder;
 import io.quarkus.devui.runtime.config.ConfigJsonRPCService;
 import io.quarkus.devui.spi.JsonRPCProvidersBuildItem;
+import io.quarkus.devui.spi.buildtime.BuildTimeActionBuildItem;
 import io.quarkus.devui.spi.page.Page;
+import io.quarkus.vertx.http.runtime.devmode.ConfigDescription;
 
 /**
  * This creates Extensions Page
  */
 public class ConfigurationProcessor {
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     InternalPageBuildItem createConfigurationPages(
             List<ConfigDescriptionBuildItem> configDescriptionBuildItems,
             Optional<DevServicesLauncherConfigResultBuildItem> devServicesLauncherConfig) {
@@ -49,13 +52,13 @@ public class ConfigurationProcessor {
         InternalPageBuildItem configurationPages = new InternalPageBuildItem("Configuration", 20);
 
         configurationPages.addPage(Page.webComponentPageBuilder()
-                .namespace("devui-configuration")
+                .namespace(NAMESPACE)
                 .title("Form Editor")
                 .icon("font-awesome-solid:sliders")
                 .componentLink("qwc-configuration.js"));
 
         configurationPages.addPage(Page.webComponentPageBuilder()
-                .namespace("devui-configuration")
+                .namespace(NAMESPACE)
                 .title("Source Editor")
                 .icon("font-awesome-solid:code")
                 .componentLink("qwc-configuration-editor.js"));
@@ -65,7 +68,7 @@ public class ConfigurationProcessor {
         return configurationPages;
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     @Record(ExecutionTime.STATIC_INIT)
     void registerConfigs(List<ConfigDescriptionBuildItem> configDescriptionBuildItems,
             Optional<DevServicesLauncherConfigResultBuildItem> devServicesLauncherConfig,
@@ -91,24 +94,39 @@ public class ConfigurationProcessor {
         recorder.registerConfigs(configDescriptions, devServicesConfig);
     }
 
-    @BuildStep(onlyIf = IsDevelopment.class)
+    @BuildStep(onlyIf = IsLocalDevelopment.class)
     @Record(ExecutionTime.RUNTIME_INIT)
-    void registerJsonRpcService(
-            BuildProducer<JsonRPCProvidersBuildItem> jsonRPCProvidersProducer,
+    void registerBuildTimeActions(
+            BuildProducer<BuildTimeActionBuildItem> buildTimeActionProducer,
             BuildProducer<SyntheticBeanBuildItem> syntheticBeanProducer,
             ConfigDevUIRecorder recorder,
             CuratedApplicationShutdownBuildItem shutdown) {
 
-        DevConsoleManager.register("config-update-property", map -> {
+        BuildTimeActionBuildItem configActions = new BuildTimeActionBuildItem(NAMESPACE);
+
+        configActions.addAction("updateProperty", map -> {
             Map<String, String> values = Collections.singletonMap(map.get("name"), map.get("value"));
             updateConfig(values);
-            return null;
+            return true;
         });
-        DevConsoleManager.register("config-set-properties", value -> {
-            String content = value.get("content");
-            setConfig(content);
-            return null;
+        configActions.addAction("updateProperties", map -> {
+            String type = map.get("type");
+
+            if (type.equalsIgnoreCase("properties")) {
+                String content = map.get("content");
+
+                Properties p = new Properties();
+                try (StringReader sr = new StringReader(content)) {
+                    p.load(sr); // Validate
+                    setConfig(content);
+                    return true;
+                } catch (IOException ex) {
+                    return false;
+                }
+            }
+            return false;
         });
+        buildTimeActionProducer.produce(configActions);
 
         syntheticBeanProducer.produce(
                 SyntheticBeanBuildItem.configure(ConfigDescriptionBean.class).unremovable()
@@ -125,8 +143,11 @@ public class ConfigurationProcessor {
                 CurrentConfig.CURRENT = Collections.emptyList();
             }
         }, true);
+    }
 
-        jsonRPCProvidersProducer.produce(new JsonRPCProvidersBuildItem("devui-configuration", ConfigJsonRPCService.class));
+    @BuildStep
+    JsonRPCProvidersBuildItem registerJsonRpcService() {
+        return new JsonRPCProvidersBuildItem(NAMESPACE, ConfigJsonRPCService.class);
     }
 
     private static final Pattern codePattern = Pattern.compile("(\\{@code )([^}]+)(\\})");
@@ -238,4 +259,6 @@ public class ConfigurationProcessor {
         }
         return configPath;
     }
+
+    private static final String NAMESPACE = "devui-configuration";
 }

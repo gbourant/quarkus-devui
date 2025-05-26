@@ -15,6 +15,7 @@ import org.codehaus.plexus.util.FileUtils;
 import org.jacoco.core.instr.Instrumenter;
 import org.jacoco.core.runtime.OfflineInstrumentationAccessGenerator;
 import org.jboss.jandex.ClassInfo;
+import org.jboss.logging.Logger;
 
 import io.quarkus.bootstrap.model.ApplicationModel;
 import io.quarkus.bootstrap.workspace.SourceDir;
@@ -36,6 +37,8 @@ import io.quarkus.maven.dependency.ResolvedDependency;
 
 public class JacocoProcessor {
 
+    private static final Logger log = Logger.getLogger(JacocoProcessor.class);
+
     @BuildStep(onlyIf = IsTest.class)
     FeatureBuildItem feature() {
         return new FeatureBuildItem("jacoco");
@@ -53,11 +56,15 @@ public class JacocoProcessor {
             //no code coverage for continuous testing, it does not really make sense
             return;
         }
+        if (!config.enabled()) {
+            log.debug("quarkus-jacoco is disabled via config");
+            return;
+        }
 
-        String dataFile = getFilePath(config.dataFile, outputTargetBuildItem.getOutputDirectory(),
+        String dataFile = getFilePath(config.dataFile(), outputTargetBuildItem.getOutputDirectory(),
                 JacocoConfig.JACOCO_QUARKUS_EXEC);
         System.setProperty("jacoco-agent.destfile", dataFile);
-        if (!config.reuseDataFile) {
+        if (!config.reuseDataFile()) {
             Files.deleteIfExists(Paths.get(dataFile));
         }
 
@@ -73,7 +80,6 @@ public class JacocoProcessor {
                 transformers.produce(
                         new BytecodeTransformerBuildItem.Builder().setClassToTransform(className)
                                 .setCacheable(true)
-                                .setEager(true)
                                 .setInputTransformer(new BiFunction<String, byte[], byte[]>() {
                                     @Override
                                     public byte[] apply(String className, byte[] bytes) {
@@ -90,15 +96,16 @@ public class JacocoProcessor {
                                 }).build());
             }
         }
-        if (config.report) {
+        if (config.report()) {
             ReportInfo info = new ReportInfo();
             info.dataFile = dataFile;
 
             File targetdir = new File(
-                    getFilePath(config.reportLocation, outputTargetBuildItem.getOutputDirectory(), JacocoConfig.JACOCO_REPORT));
+                    getFilePath(config.reportLocation(), outputTargetBuildItem.getOutputDirectory(),
+                            JacocoConfig.JACOCO_REPORT));
             info.reportDir = targetdir.getAbsolutePath();
-            String includes = String.join(",", config.includes);
-            String excludes = String.join(",", config.excludes.orElse(Collections.emptyList()));
+            String includes = String.join(",", config.includes());
+            String excludes = String.join(",", config.excludes().orElse(Collections.emptyList()));
             Set<String> classes = new HashSet<>();
             info.classFiles = classes;
 
@@ -121,7 +128,7 @@ public class JacocoProcessor {
 
     private void addProjectModule(ResolvedDependency module, JacocoConfig config, ReportInfo info, String includes,
             String excludes, Set<String> classes, Set<String> sources) throws Exception {
-        String dataFile = getFilePath(config.dataFile, module.getWorkspaceModule().getBuildDir().toPath(),
+        String dataFile = getFilePath(config.dataFile(), module.getWorkspaceModule().getBuildDir().toPath(),
                 JacocoConfig.JACOCO_QUARKUS_EXEC);
         info.savedData.add(new File(dataFile).getAbsolutePath());
         if (module.getSources() == null) {

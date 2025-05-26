@@ -1,17 +1,19 @@
 package io.quarkus.smallrye.reactivemessaging.deployment;
 
 import static io.quarkus.deployment.annotations.ExecutionTime.STATIC_INIT;
-import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.BLOCKING;
+import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.INCOMING;
+import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.INCOMINGS;
 import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.RUN_ON_VIRTUAL_THREAD;
-import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.SMALLRYE_BLOCKING;
-import static io.quarkus.smallrye.reactivemessaging.deployment.ReactiveMessagingDotNames.TRANSACTIONAL;
 
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import jakarta.enterprise.context.Dependent;
 import jakarta.enterprise.inject.Vetoed;
@@ -63,14 +65,21 @@ import io.quarkus.gizmo.ResultHandle;
 import io.quarkus.runtime.metrics.MetricsFactory;
 import io.quarkus.runtime.util.HashUtil;
 import io.quarkus.smallrye.health.deployment.spi.HealthBuildItem;
+import io.quarkus.smallrye.reactivemessaging.deployment.items.ChannelDirection;
+import io.quarkus.smallrye.reactivemessaging.deployment.items.ConnectorManagedChannelBuildItem;
 import io.quarkus.smallrye.reactivemessaging.deployment.items.InjectedChannelBuildItem;
 import io.quarkus.smallrye.reactivemessaging.deployment.items.InjectedEmitterBuildItem;
 import io.quarkus.smallrye.reactivemessaging.deployment.items.MediatorBuildItem;
+import io.quarkus.smallrye.reactivemessaging.runtime.ConnectorContextPropagationDecorator;
+import io.quarkus.smallrye.reactivemessaging.runtime.ContextualEmitterFactory;
 import io.quarkus.smallrye.reactivemessaging.runtime.DuplicatedContextConnectorFactory;
 import io.quarkus.smallrye.reactivemessaging.runtime.DuplicatedContextConnectorFactoryInterceptor;
+import io.quarkus.smallrye.reactivemessaging.runtime.HealthCenterFilter;
+import io.quarkus.smallrye.reactivemessaging.runtime.HealthCenterInterceptor;
 import io.quarkus.smallrye.reactivemessaging.runtime.QuarkusMediatorConfiguration;
 import io.quarkus.smallrye.reactivemessaging.runtime.QuarkusWorkerPoolRegistry;
 import io.quarkus.smallrye.reactivemessaging.runtime.ReactiveMessagingConfiguration;
+import io.quarkus.smallrye.reactivemessaging.runtime.RequestScopedDecorator;
 import io.quarkus.smallrye.reactivemessaging.runtime.SmallRyeReactiveMessagingLifecycle;
 import io.quarkus.smallrye.reactivemessaging.runtime.SmallRyeReactiveMessagingRecorder;
 import io.quarkus.smallrye.reactivemessaging.runtime.SmallRyeReactiveMessagingRecorder.SmallRyeReactiveMessagingContext;
@@ -80,9 +89,9 @@ import io.quarkus.smallrye.reactivemessaging.runtime.devmode.DevModeSupportConne
 import io.smallrye.reactive.messaging.EmitterConfiguration;
 import io.smallrye.reactive.messaging.Invoker;
 import io.smallrye.reactive.messaging.annotations.Blocking;
-import io.smallrye.reactive.messaging.health.SmallRyeReactiveMessagingLivenessCheck;
-import io.smallrye.reactive.messaging.health.SmallRyeReactiveMessagingReadinessCheck;
-import io.smallrye.reactive.messaging.health.SmallRyeReactiveMessagingStartupCheck;
+import io.smallrye.reactive.messaging.extension.health.SmallRyeReactiveMessagingLivenessCheck;
+import io.smallrye.reactive.messaging.extension.health.SmallRyeReactiveMessagingReadinessCheck;
+import io.smallrye.reactive.messaging.extension.health.SmallRyeReactiveMessagingStartupCheck;
 import io.smallrye.reactive.messaging.providers.extension.ChannelConfiguration;
 
 public class SmallRyeReactiveMessagingProcessor {
@@ -102,15 +111,18 @@ public class SmallRyeReactiveMessagingProcessor {
 
     @BuildStep
     FeatureBuildItem feature() {
-        return new FeatureBuildItem(Feature.SMALLRYE_REACTIVE_MESSAGING);
+        return new FeatureBuildItem(Feature.MESSAGING);
     }
 
     @BuildStep
-    AdditionalBeanBuildItem beans() {
+    void beans(BuildProducer<AdditionalBeanBuildItem> additionalBean, ReactiveMessagingBuildTimeConfig buildTimeConfig) {
         // We add the connector and channel qualifiers to make them part of the index.
-        return new AdditionalBeanBuildItem(SmallRyeReactiveMessagingLifecycle.class, Connector.class,
+        additionalBean.produce(new AdditionalBeanBuildItem(SmallRyeReactiveMessagingLifecycle.class, Connector.class,
                 Channel.class, io.smallrye.reactive.messaging.annotations.Channel.class,
-                QuarkusWorkerPoolRegistry.class);
+                QuarkusWorkerPoolRegistry.class, ConnectorContextPropagationDecorator.class, ContextualEmitterFactory.class));
+        if (buildTimeConfig.activateRequestScopeEnabled()) {
+            additionalBean.produce(new AdditionalBeanBuildItem(RequestScopedDecorator.class));
+        }
     }
 
     @BuildStep
@@ -123,11 +135,17 @@ public class SmallRyeReactiveMessagingProcessor {
             }
 
             @Override
+            public int priority() {
+                // Must run after the SpringDIProcessor annotation transformer, which has default priority 1000
+                return 500;
+            }
+
+            @Override
             public void transform(AnnotationsTransformer.TransformationContext ctx) {
                 if (ctx.isClass()) {
                     ClassInfo clazz = ctx.getTarget().asClass();
                     Map<DotName, List<AnnotationInstance>> annotations = clazz.annotationsMap();
-                    if (scopes.isScopeDeclaredOn(clazz)
+                    if (scopes.isScopeIn(ctx.getAnnotations())
                             || annotations.containsKey(ReactiveMessagingDotNames.JAXRS_PATH)
                             || annotations.containsKey(ReactiveMessagingDotNames.REST_CONTROLLER)
                             || annotations.containsKey(ReactiveMessagingDotNames.JAXRS_PROVIDER)) {
@@ -173,7 +191,7 @@ public class SmallRyeReactiveMessagingProcessor {
     @BuildStep
     public AnnotationsTransformerBuildItem enableMetrics(Optional<MetricsCapabilityBuildItem> metricsCapability,
             ReactiveMessagingConfiguration configuration) {
-        boolean isMetricEnabled = metricsCapability.isPresent() && configuration.metricsEnabled;
+        boolean isMetricEnabled = metricsCapability.isPresent() && configuration.metricsEnabled();
         boolean useMicrometer = isMetricEnabled && metricsCapability.get().metricsSupported(MetricsFactory.MICROMETER);
         LOGGER.debug("Metrics Enabled: " + isMetricEnabled + "; Using Micrometer: " + useMicrometer);
         return new AnnotationsTransformerBuildItem(new AnnotationsTransformer() {
@@ -205,17 +223,42 @@ public class SmallRyeReactiveMessagingProcessor {
     }
 
     @BuildStep
+    public void disableObservation(BuildProducer<RunTimeConfigurationDefaultBuildItem> runtimeConfigProducer) {
+        runtimeConfigProducer.produce(
+                new RunTimeConfigurationDefaultBuildItem("smallrye.messaging.observation.enabled", "false"));
+    }
+
+    @BuildStep
     public void enableHealth(ReactiveMessagingBuildTimeConfig buildTimeConfig,
-            BuildProducer<HealthBuildItem> producer) {
+            BuildProducer<HealthBuildItem> producer, BuildProducer<AdditionalBeanBuildItem> beans,
+            BuildProducer<AnnotationsTransformerBuildItem> transformations) {
         producer.produce(
                 new HealthBuildItem(SmallRyeReactiveMessagingLivenessCheck.class.getName(),
-                        buildTimeConfig.healthEnabled));
+                        buildTimeConfig.healthEnabled()));
         producer.produce(
                 new HealthBuildItem(SmallRyeReactiveMessagingReadinessCheck.class.getName(),
-                        buildTimeConfig.healthEnabled));
+                        buildTimeConfig.healthEnabled()));
         producer.produce(
                 new HealthBuildItem(SmallRyeReactiveMessagingStartupCheck.class.getName(),
-                        buildTimeConfig.healthEnabled));
+                        buildTimeConfig.healthEnabled()));
+        if (buildTimeConfig.healthEnabled()) {
+            beans.produce(new AdditionalBeanBuildItem(HealthCenterFilter.class, HealthCenterInterceptor.class));
+
+            transformations.produce(new AnnotationsTransformerBuildItem(new AnnotationsTransformer() {
+                @Override
+                public boolean appliesTo(AnnotationTarget.Kind kind) {
+                    return kind == AnnotationTarget.Kind.CLASS;
+                }
+
+                @Override
+                public void transform(TransformationContext ctx) {
+                    ClassInfo clazz = ctx.getTarget().asClass();
+                    if (clazz.name().equals(ReactiveMessagingDotNames.HEALTH_CENTER)) {
+                        ctx.transform().add(HealthCenterFilter.class).done();
+                    }
+                }
+            }));
+        }
     }
 
     @BuildStep
@@ -223,6 +266,7 @@ public class SmallRyeReactiveMessagingProcessor {
     public void build(SmallRyeReactiveMessagingRecorder recorder, RecorderContext recorderContext,
             BuildProducer<SyntheticBeanBuildItem> syntheticBeans,
             List<MediatorBuildItem> mediatorMethods,
+            List<ConnectorManagedChannelBuildItem> connectorManagedChannels,
             List<InjectedEmitterBuildItem> emitterFields,
             List<InjectedChannelBuildItem> channelFields,
             BuildProducer<GeneratedClassBuildItem> generatedClass,
@@ -232,9 +276,14 @@ public class SmallRyeReactiveMessagingProcessor {
 
         ClassOutput classOutput = new GeneratedClassGizmoAdaptor(generatedClass, true);
 
+        Set<String> connectorManagedIncomingChannels = connectorManagedChannels.stream()
+                .filter(c -> c.getDirection() == ChannelDirection.INCOMING)
+                .map(ConnectorManagedChannelBuildItem::getName)
+                .collect(Collectors.toSet());
+
         List<QuarkusMediatorConfiguration> mediatorConfigurations = new ArrayList<>(mediatorMethods.size());
         List<WorkerConfiguration> workerConfigurations = new ArrayList<>();
-        List<EmitterConfiguration> emittersConfigurations = new ArrayList<>();
+        Map<String, EmitterConfiguration> emittersConfigurations = new HashMap<>();
         List<ChannelConfiguration> channelConfigurations = new ArrayList<>();
 
         /*
@@ -246,9 +295,7 @@ public class SmallRyeReactiveMessagingProcessor {
             MethodInfo methodInfo = mediatorMethod.getMethod();
             BeanInfo bean = mediatorMethod.getBean();
 
-            if (methodInfo.hasAnnotation(BLOCKING) || methodInfo.hasAnnotation(SMALLRYE_BLOCKING)
-                    || methodInfo.hasAnnotation(RUN_ON_VIRTUAL_THREAD)
-                    || methodInfo.hasAnnotation(TRANSACTIONAL)) {
+            if (QuarkusMediatorConfigurationUtil.hasBlockingAnnotation(methodInfo)) {
                 // Just in case both annotation are used, use @Blocking value.
                 String poolName = methodInfo.hasAnnotation(RUN_ON_VIRTUAL_THREAD)
                         ? QuarkusWorkerPoolRegistry.DEFAULT_VIRTUAL_THREAD_WORKER
@@ -273,7 +320,10 @@ public class SmallRyeReactiveMessagingProcessor {
 
                 QuarkusMediatorConfiguration mediatorConfiguration = QuarkusMediatorConfigurationUtil
                         .create(methodInfo, isSuspendMethod, bean, recorderContext,
-                                Thread.currentThread().getContextClassLoader(), conf.strict);
+                                Thread.currentThread().getContextClassLoader(), conf.strict(),
+                                consumesFromConnector(methodInfo, connectorManagedIncomingChannels)
+                                        ? conf.blockingSignaturesExecutionMode()
+                                        : ReactiveMessagingConfiguration.ExecutionMode.EVENT_LOOP); // disable execution mode setting for inner channels
                 mediatorConfigurations.add(mediatorConfiguration);
 
                 String generatedInvokerName = generateInvoker(bean, methodInfo, isSuspendMethod, mediatorConfiguration,
@@ -293,15 +343,23 @@ public class SmallRyeReactiveMessagingProcessor {
         }
 
         for (InjectedEmitterBuildItem it : emitterFields) {
-            emittersConfigurations.add(it.getEmitterConfig());
+            EmitterConfiguration configuration = it.getEmitterConfig();
+            String channel = configuration.name();
+            EmitterConfiguration previousConfig = emittersConfigurations.get(channel);
+            if (previousConfig != null && !previousConfig.equals(configuration)) {
+                throw new DeploymentException(
+                        String.format("Emitter configuration for channel `%s` is different than previous configuration : %s",
+                                channel, it.getEmitterConfig()));
+            }
+            emittersConfigurations.put(channel, configuration);
         }
         for (InjectedChannelBuildItem it : channelFields) {
             channelConfigurations.add(it.getChannelConfig());
         }
 
         syntheticBeans.produce(SyntheticBeanBuildItem.configure(SmallRyeReactiveMessagingContext.class)
-                .supplier(recorder.createContext(mediatorConfigurations, workerConfigurations, emittersConfigurations,
-                        channelConfigurations))
+                .supplier(recorder.createContext(mediatorConfigurations, workerConfigurations,
+                        new ArrayList<>(emittersConfigurations.values()), channelConfigurations))
                 .done());
     }
 
@@ -550,6 +608,20 @@ public class SmallRyeReactiveMessagingProcessor {
                 return false;
             }
         }));
+    }
+
+    boolean consumesFromConnector(MethodInfo methodInfo, Set<String> connectorManagedChannels) {
+        AnnotationInstance incoming = methodInfo.annotation(INCOMING);
+        if (incoming != null) {
+            return connectorManagedChannels.contains(incoming.value().asString());
+        }
+        AnnotationInstance incomings = methodInfo.annotation(INCOMINGS);
+        if (incomings != null) {
+            return connectorManagedChannels.containsAll(
+                    Arrays.stream(incomings.value().asNestedArray())
+                            .map(i -> i.value().asString()).collect(Collectors.toSet()));
+        }
+        return false;
     }
 
 }

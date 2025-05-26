@@ -10,12 +10,14 @@ include::_attributes.adoc[]
 :categories: observability
 :summary: Use Micrometer to collect metrics produced by Quarkus, its extensions, and your application.
 :base-units: https://github.com/micrometer-metrics/micrometer/blob/main/micrometer-core/src/main/java/io/micrometer/core/instrument/binder/BaseUnits.java
-:concepts: https://micrometer.io/docs/concepts
+:concepts: https://docs.micrometer.io/micrometer/reference/concepts
 :topics: observability,micrometer
 :extensions: io.quarkus:quarkus-micrometer
 
 Micrometer provides an abstraction layer for metrics collection.
 It defines an API for basic meter types, like counters, gauges, timers, and distribution summaries, along with a `MeterRegistry` API that generalizes metrics collection and propagation for different backend monitoring systems.
+
+include::{includes}/observability-include.adoc[]
 
 IMPORTANT: Micrometer is the recommended approach to metrics for Quarkus.
 
@@ -179,14 +181,14 @@ Given the following declaration of a timer: `registry.timer("http.server.request
 === Define dimensions for aggregation
 
 Metrics, single numerical measurements, often have additional data captured with them. This ancillary data is used to group or aggregate metrics for analysis.
-The Micrometer API refers to this dimensional data as tags, but you may it referred to as "labels" or "attributes" in other documentation sources.
+The Micrometer API refers to this dimensional data as tags, but you may see it referred to as "labels" or "attributes" in other documentation sources.
 
-Micrometer is built primariliy for backend monitoring systems that support dimensional data (metric names that are enchriched with key/value pairs).
-For heirarchical systems that only support a flat metric name, Micrometer will flatten the set of key/value pairs (sorted by key) and add them to the name.
+Micrometer is built primarily for backend monitoring systems that support dimensional data (metric names that are enriched with key/value pairs).
+For hierarchical systems that only support a flat metric name, Micrometer will flatten the set of key/value pairs (sorted by key) and add them to the name.
 
 Tags can be specified when a meter is registered with a `MeterRegistry` or using a <<meter-filter,Meter Filter>>.
 
-See the Micrometer documentation for additional advice on link:{concepts}#_tag_naming[tag naming].
+See the Micrometer documentation for additional advice on link:{concepts}/naming[tag naming].
 
 IMPORTANT: Each unique combination of metric name and dimension produces a unique time series.
 Using an unbounded set of dimensional data can lead to a "cardinality explosion", an exponential increase in the creation of new time series.
@@ -277,7 +279,7 @@ Gauge.builder("jvm.threads.peak", threadBean, ThreadMXBean::getPeakThreadCount) 
 <4> Associate <<define-tags,tags>> with the gauge
 <5> Register the Gauge with the MeterRegistry
 
-See link:{concepts}#_gauges[Gauges] in the Micrometer documentation for more information and examples.
+See link:{concepts}/gauges[Gauges] in the Micrometer documentation for more information and examples.
 Of note are two special cases: `TimeGauge` for measuring time, and a `MultiGauge` for reporting several criteria together.
 
 NOTE: Micrometer does not create strong references to the objects it observes by default.
@@ -334,7 +336,7 @@ void countThisMethod(){
 <1> A CDI interceptor will create and register a counter called `counted.method`
 <2> The interceptor-created counter will have the "extra" dimension tag with value "annotated"
 
-See link:{concepts}#_counters[Counters] in the Micrometer documentation for more information and examples, including the less common `FunctionCounter` that can be used to measure the result returned by an always increasing function.
+See link:{concepts}/counters[Counters] in the Micrometer documentation for more information and examples, including the less common `FunctionCounter` that can be used to measure the result returned by an always increasing function.
 
 When should you use a counter?
 Use a counter if you are doing something that can not be either timed or summarized.
@@ -476,7 +478,7 @@ sample.stop(registry.timer("my.timer", "response", response.status())); // <3>
 ==== Histograms and percentiles
 
 Both timers and distribution summaries can be configured to emit additional statistics, like histogram data, precomputed percentiles, or service level objective (SLO) boundaries.
-See link:{concepts}#_timers[Timers] and link:{concepts}#_distribution_summaries[Distribution Summaries] in the Micrometer documentation for more information and examples, including memory footprint estimation for both types.
+See link:{concepts}/timers[Timers] and link:{concepts}/distribution-summaries[Distribution Summaries] in the Micrometer documentation for more information and examples, including memory footprint estimation for both types.
 
 [IMPORTANT]
 ====
@@ -588,7 +590,13 @@ link:https://micrometer.io/docs/concepts[official documentation].
 
 === Use `HttpServerMetricsTagsContributor` for server HTTP requests
 
-By providing CDI beans that implement `io.quarkus.micrometer.runtime.HttpServerMetricsTagsContributor`, user code can contribute arbitrary tags based on the details of HTTP request
+By providing CDI beans that implement `io.quarkus.micrometer.runtime.HttpServerMetricsTagsContributor`, user code can contribute arbitrary tags based on the details of HTTP request and responses.
+
+CAUTION: When creating tags using this interface, it's important to limit the cardinality of the values, otherwise there is a risk of severely degrading the metrics system's capacity.
+
+=== Use `HttpClientMetricsTagsContributor` for client HTTP requests
+
+By providing CDI beans that implement `io.quarkus.micrometer.runtime.HttpClientMetricsTagsContributor`, user code can contribute arbitrary tags based on the details of HTTP request
 
 === Use `MeterRegistryCustomizer` for arbitrary customizations to meter registries
 
@@ -603,8 +611,59 @@ The `@Timed` annotation will wrap the execution of a method and will emit the fo
 in addition to any tags defined on the annotation itself:
 class, method, and exception (either "none" or the simple class name of a detected exception).
 
-Using annotations is limited, as you can't dynamically assign meaningful tag values.
-Also note that many methods, e.g. REST endpoint methods or Vert.x Routes, are counted and timed by the micrometer extension out of the box.
+Parameters to `@Counted` and `@Timed` can be annotated with `@MeterTag` to dynamically assign meaningful tag values.
+
+`MeterTag.resolver` can be used to extract a tag from a method parameter, by creating a bean
+implementing `io.micrometer.common.annotation.ValueResolver` and referring to this class: `@MeterTag(resolver=CustomResolver.class)`
+
+`MeterTag.expression` is also supported, but you have to implement the evaluation of the expression
+by creating a bean implementing `io.micrometer.common.annotation.ValueExpressionResolver` that can evaluate expressions.
+
+[source,java]
+----
+enum Currency { USD, EUR }
+
+@Singleton
+class EnumOrdinalResolver implements ValueResolver {
+    @Override
+    public String resolve(Object parameter) {
+        if(parameter instanceof Enum) {
+            return String.valueOf(((Enum<?>) parameter).ordinal());
+        }
+        return null;
+    }
+}
+
+@Singleton
+public class MyExpressionResolver implements ValueExpressionResolver {
+    @Override
+    public String resolve(String expression, Object parameter) {
+        return someParser.parse(expression).evaluate(parameter);
+    }
+}
+
+// tags = type=with_enum, currency=${currency.toString()}
+@Timed(value="time_something", extraTags = {"type", "with_enum"})
+public Something calculateSomething(@MeterTag Currency currency) { ... }
+
+// tags = type=with_enum, the_currency=${currency.toString()}
+@Timed(value="time_something", extraTags = {"type", "with_enum"})
+public Something calculateSomething(@MeterTag(key="the_currency") Currency currency) { ... }
+
+// tags = type=with_enum, currency=${currency.ordinal()}
+@Timed(value="time_something", extraTags = {"type", "with_enum"})
+public Something calculateSomething(@MeterTag(resolver=EnumOrdinalResolver.class) Currency currency) { ... }
+
+// tags = type=with_enum, currency=${currency.ordinal()}
+@Timed(value="time_something", extraTags = {"type", "with_enum"})
+public Something calculateSomething(@MeterTag(expression="currency.ordinal()") Currency currency) { ... }
+----
+
+IMPORTANT: Provided tag values MUST BE of LOW-CARDINALITY.
+High-cardinality values can lead to performance and storage issues in your metrics backend (a "cardinality explosion").
+Tag values should not use end-user data, since those could be high-cardinality.
+
+Many methods, like REST endpoint methods or Vert.x Routes, are counted and timed by the micrometer extension out of the box.
 
 == Support for the MicroProfile Metrics API
 
@@ -695,12 +754,12 @@ Refer to the xref:./management-interface-reference.adoc[management interface ref
 * https://quarkus.io/guides/mongodb[`quarkus-mongodb-client`]
 * https://quarkus.io/extensions/io.quarkus/quarkus-netty[`quarkus-netty`]
 * https://quarkus.io/guides/redis[`quarkus-redis-client`]
-* https://quarkus.io/guides/rest-client[`quarkus-rest-client`]
+* https://quarkus.io/guides/rest[`quarkus-rest`]
 * https://quarkus.io/guides/resteasy[`quarkus-resteasy-jackson`]
-* https://quarkus.io/guides/resteasy-reactive[`quarkus-resteasy-reactive`]
+* https://quarkus.io/guides/resteasy-client[`quarkus-resteasy-client`]
 * https://quarkus.io/guides/scheduler[`quarkus-scheduler`]
 * https://quarkus.io/guides/smallrye-graphql[`quarkus-smallrye-graphql`]
-* https://quarkus.io/extensions/io.quarkus/quarkus-smallrye-reactive-messaging[`quarkus-smallrye-reactive-messaging`]
+* https://quarkus.io/extensions/io.quarkus/quarkus-messaging[`quarkus-messaging`]
 ** AMQP 1.0
 ** RabbitMQ
 ** Kafka
@@ -710,6 +769,7 @@ Refer to the xref:./management-interface-reference.adoc[management interface ref
 ** Camel Messaging
 * https://quarkus.io/guides/stork-reference[`quarkus-smallrye-stork`]
 * https://quarkus.io/guides/vertx[`quarkus-vertx`] (http requests)
+* xref:websockets-next-reference.adoc[`websockets-next`]
 
 == Configuration Reference
 

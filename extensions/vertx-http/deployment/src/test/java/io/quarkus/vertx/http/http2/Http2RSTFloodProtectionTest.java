@@ -11,8 +11,8 @@ import java.util.concurrent.TimeUnit;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 
+import org.jboss.shrinkwrap.api.asset.StringAsset;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
@@ -21,18 +21,28 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import io.quarkus.test.QuarkusUnitTest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.vertx.core.runtime.VertxCoreRecorder;
+import io.smallrye.certs.Format;
+import io.smallrye.certs.junit5.Certificate;
+import io.smallrye.certs.junit5.Certificates;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpVersion;
-import io.vertx.core.net.JdkSSLEngineOptions;
+import io.vertx.core.net.JksOptions;
 import io.vertx.ext.web.Router;
 
 /**
  * Reproduce CVE-2023-44487.
  */
+@Certificates(baseDir = "target/certs", certificates = @Certificate(name = "ssl-test", password = "secret", formats = {
+        Format.JKS, Format.PKCS12, Format.PEM }))
 @DisabledOnOs(OS.WINDOWS)
 public class Http2RSTFloodProtectionTest {
+
+    private static final String configuration = """
+            quarkus.http.ssl.certificate.key-store-file=server-keystore.jks
+            quarkus.http.ssl.certificate.key-store-password=secret
+            """;
 
     @TestHTTPResource(value = "/ping", ssl = true)
     URL sslUrl;
@@ -44,17 +54,17 @@ public class Http2RSTFloodProtectionTest {
     static final QuarkusUnitTest config = new QuarkusUnitTest()
             .withApplicationRoot((jar) -> jar
                     .addClasses(MyBean.class)
-                    .addAsResource(new File("src/test/resources/conf/ssl-jks.conf"), "application.properties")
-                    .addAsResource(new File("src/test/resources/conf/server-keystore.jks"), "server-keystore.jks"));
+                    .addAsResource(new StringAsset(configuration), "application.properties")
+                    .addAsResource(new File("target/certs/ssl-test-keystore.jks"), "server-keystore.jks"));
 
     @Test
     void testRstFloodProtectionWithTlsEnabled() throws Exception {
-        Assumptions.assumeTrue(JdkSSLEngineOptions.isAlpnAvailable()); //don't run on JDK8
         HttpClientOptions options = new HttpClientOptions()
                 .setUseAlpn(true)
                 .setProtocolVersion(HttpVersion.HTTP_2)
                 .setSsl(true)
-                .setTrustAll(true);
+                .setTrustOptions(new JksOptions().setPath(new File("target/certs/ssl-test-truststore.jks").getAbsolutePath())
+                        .setPassword("secret"));
 
         var client = VertxCoreRecorder.getVertx().get().createHttpClient(options);
         int port = sslUrl.getPort();

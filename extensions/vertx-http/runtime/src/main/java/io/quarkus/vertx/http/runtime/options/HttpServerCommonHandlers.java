@@ -3,6 +3,8 @@ package io.quarkus.vertx.http.runtime.options;
 import static io.quarkus.vertx.core.runtime.context.VertxContextSafetyToggle.setCurrentContextSafe;
 import static io.quarkus.vertx.http.runtime.TrustedProxyCheck.allowAll;
 
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -23,6 +25,7 @@ import io.quarkus.vertx.http.runtime.VertxHttpRecorder;
 import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Context;
 import io.vertx.core.Handler;
+import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
@@ -31,8 +34,8 @@ import io.vertx.ext.web.RoutingContext;
 
 public class HttpServerCommonHandlers {
     public static void enforceMaxBodySize(ServerLimitsConfig limits, Router httpRouteRouter) {
-        if (limits.maxBodySize.isPresent()) {
-            long limit = limits.maxBodySize.get().asLongValue();
+        if (limits.maxBodySize().isPresent()) {
+            long limit = limits.maxBodySize().get().asLongValue();
             Long limitObj = limit;
             httpRouteRouter.route().order(RouteConstants.ROUTE_ORDER_UPLOAD_LIMIT).handler(new Handler<RoutingContext>() {
                 @Override
@@ -62,7 +65,8 @@ public class HttpServerCommonHandlers {
         }
     }
 
-    public static Handler<HttpServerRequest> enforceDuplicatedContext(Handler<HttpServerRequest> delegate) {
+    public static Handler<HttpServerRequest> enforceDuplicatedContext(Handler<HttpServerRequest> delegate,
+            boolean mustResumeRequest) {
         return new Handler<HttpServerRequest>() {
             @Override
             public void handle(HttpServerRequest event) {
@@ -75,12 +79,12 @@ public class HttpServerCommonHandlers {
                         @Override
                         public void handle(Void x) {
                             setCurrentContextSafe(true);
-                            delegate.handle(new ResumingRequestWrapper(event));
+                            delegate.handle(new ResumingRequestWrapper(event, mustResumeRequest));
                         }
                     });
                 } else {
                     setCurrentContextSafe(true);
-                    delegate.handle(new ResumingRequestWrapper(event));
+                    delegate.handle(new ResumingRequestWrapper(event, mustResumeRequest));
                 }
             }
         };
@@ -88,7 +92,7 @@ public class HttpServerCommonHandlers {
 
     public static Handler<HttpServerRequest> applyProxy(ProxyConfig proxyConfig, Handler<HttpServerRequest> root,
             Supplier<Vertx> vertx) {
-        if (proxyConfig.proxyAddressForwarding) {
+        if (proxyConfig.proxyAddressForwarding()) {
             final ForwardingProxyOptions forwardingProxyOptions = ForwardingProxyOptions.from(proxyConfig);
             final TrustedProxyCheck.TrustedProxyCheckBuilder proxyCheckBuilder = forwardingProxyOptions.trustedProxyCheckBuilder;
             if (proxyCheckBuilder == null) {
@@ -112,19 +116,20 @@ public class HttpServerCommonHandlers {
         if (!filtersInConfig.isEmpty()) {
             for (var entry : filtersInConfig.entrySet()) {
                 var filterConfig = entry.getValue();
-                var matches = filterConfig.matches;
-                var order = filterConfig.order.orElse(Integer.MIN_VALUE);
-                var methods = filterConfig.methods;
-                var headers = filterConfig.header;
+                var matches = filterConfig.matches();
+                var order = filterConfig.order().orElse(Integer.MIN_VALUE);
+                var methods = filterConfig.methods();
+                var headers = filterConfig.header();
                 if (methods.isEmpty()) {
                     httpRouteRouter.routeWithRegex(matches)
                             .order(order)
                             .handler(new Handler<RoutingContext>() {
                                 @Override
                                 public void handle(RoutingContext event) {
-                                    event.response().headers().setAll(headers);
+                                    addFilterHeaders(event, headers);
                                     event.next();
                                 }
+
                             });
                 } else {
                     for (var method : methods.get()) {
@@ -133,11 +138,32 @@ public class HttpServerCommonHandlers {
                                 .handler(new Handler<RoutingContext>() {
                                     @Override
                                     public void handle(RoutingContext event) {
-                                        event.response().headers().setAll(headers);
+                                        addFilterHeaders(event, headers);
                                         event.next();
                                     }
                                 });
                     }
+                }
+            }
+        }
+    }
+
+    private static void addFilterHeaders(RoutingContext event, Map<String, String> headers) {
+        for (var entry : headers.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
+            MultiMap responseHeaders = event.response().headers();
+            List<String> oldValues = responseHeaders.getAll(key);
+            if (oldValues.isEmpty()) {
+                responseHeaders.set(key, value);
+            } else {
+                // we need to make sure the new value is not duplicated
+                var newValues = new LinkedHashSet<String>(oldValues);
+                boolean added = newValues.add(value);
+                if (added) {
+                    responseHeaders.set(key, newValues);
+                } else {
+                    // we don't need to do anything here as the value was already in the set
                 }
             }
         }
@@ -149,24 +175,24 @@ public class HttpServerCommonHandlers {
             for (Map.Entry<String, HeaderConfig> entry : headers.entrySet()) {
                 var name = entry.getKey();
                 var config = entry.getValue();
-                if (config.methods.isEmpty()) {
-                    httpRouteRouter.route(config.path)
+                if (config.methods().isEmpty()) {
+                    httpRouteRouter.route(config.path())
                             .order(RouteConstants.ROUTE_ORDER_HEADERS)
                             .handler(new Handler<RoutingContext>() {
                                 @Override
                                 public void handle(RoutingContext event) {
-                                    event.response().headers().set(name, config.value);
+                                    event.response().headers().set(name, config.value());
                                     event.next();
                                 }
                             });
                 } else {
-                    for (String method : config.methods.get()) {
-                        httpRouteRouter.route(HttpMethod.valueOf(method.toUpperCase(Locale.ROOT)), config.path)
+                    for (String method : config.methods().get()) {
+                        httpRouteRouter.route(HttpMethod.valueOf(method.toUpperCase(Locale.ROOT)), config.path())
                                 .order(RouteConstants.ROUTE_ORDER_HEADERS)
                                 .handler(new Handler<RoutingContext>() {
                                     @Override
                                     public void handle(RoutingContext event) {
-                                        event.response().headers().add(name, config.value);
+                                        event.response().headers().add(name, config.value());
                                         event.next();
                                     }
                                 });

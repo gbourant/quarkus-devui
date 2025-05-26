@@ -24,12 +24,6 @@ public final class CompiledJavaVersionBuildItem extends SimpleBuildItem {
 
     public interface JavaVersion {
 
-        Status isExactlyJava11();
-
-        Status isJava11OrHigher();
-
-        Status isJava17OrHigher();
-
         Status isJava21OrHigher();
 
         Status isJava19OrHigher();
@@ -46,21 +40,6 @@ public final class CompiledJavaVersionBuildItem extends SimpleBuildItem {
             }
 
             @Override
-            public Status isExactlyJava11() {
-                return Status.UNKNOWN;
-            }
-
-            @Override
-            public Status isJava11OrHigher() {
-                return Status.UNKNOWN;
-            }
-
-            @Override
-            public Status isJava17OrHigher() {
-                return Status.UNKNOWN;
-            }
-
-            @Override
             public Status isJava21OrHigher() {
                 return Status.UNKNOWN;
             }
@@ -73,8 +52,6 @@ public final class CompiledJavaVersionBuildItem extends SimpleBuildItem {
 
         final class Known implements JavaVersion {
 
-            private static final int JAVA_11_MAJOR = 55;
-            private static final int JAVA_17_MAJOR = 61;
             private static final int JAVA_19_MAJOR = 63;
             private static final int JAVA_21_MAJOR = 65;
 
@@ -82,21 +59,6 @@ public final class CompiledJavaVersionBuildItem extends SimpleBuildItem {
 
             Known(int determinedMajor) {
                 this.determinedMajor = determinedMajor;
-            }
-
-            @Override
-            public Status isExactlyJava11() {
-                return equalStatus(JAVA_11_MAJOR);
-            }
-
-            @Override
-            public Status isJava11OrHigher() {
-                return higherOrEqualStatus(JAVA_11_MAJOR);
-            }
-
-            @Override
-            public Status isJava17OrHigher() {
-                return higherOrEqualStatus(JAVA_17_MAJOR);
             }
 
             @Override

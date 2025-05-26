@@ -12,6 +12,7 @@ import jakarta.annotation.security.RolesAllowed;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.shrinkwrap.api.asset.StringAsset;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -40,13 +41,14 @@ public class RolesAllowedExpressionTest {
             "%test.test-profile-admin=admin\n" +
             "missing-profile-profile-admin=superman\n" +
             "%missing-profile.missing-profile-profile-admin=admin\n" +
-            "all-roles=Administrator,Software,Tester,User\n";
+            "all-roles=Administrator,Software,Tester,User\n" +
+            "ldap-roles=cn=Administrator\\\\,ou=Software\\\\,dc=Tester\\\\,dc=User\n";
 
     @RegisterExtension
     static final QuarkusUnitTest config = new QuarkusUnitTest()
             .withApplicationRoot((jar) -> jar
                     .addClasses(RolesAllowedBean.class, IdentityMock.class,
-                            AuthData.class, SecurityTestUtils.class)
+                            AuthData.class, SecurityTestUtils.class, SecuredUtils.class)
                     .addAsResource(new StringAsset(APP_PROPS), "application.properties"));
 
     @Inject
@@ -90,6 +92,16 @@ public class RolesAllowedExpressionTest {
         assertSuccess(() -> bean.list(), "list",
                 new AuthData(Set.of("Administrator", "Software", "Tester", "User"), false, "list"));
         assertFailureFor(() -> bean.list(), ForbiddenException.class, ADMIN);
+
+        // property expression with escaped collection separator should not be treated as list
+        assertSuccess(() -> bean.ldap(), "ldap",
+                new AuthData(Set.of("cn=Administrator,ou=Software,dc=Tester,dc=User"), false, "ldap"));
+    }
+
+    @Test
+    public void testStaticSecuredMethod() {
+        assertSuccess(SecuredUtils::staticSecuredMethod, "admin", ADMIN);
+        assertFailureFor(SecuredUtils::staticSecuredMethod, ForbiddenException.class, USER);
     }
 
     @Singleton
@@ -139,6 +151,24 @@ public class RolesAllowedExpressionTest {
         @RolesAllowed("${all-roles}")
         public final String list() {
             return "list";
+        }
+
+        @RolesAllowed("${ldap-roles}")
+        public final String ldap() {
+            return "ldap";
+        }
+
+    }
+
+    public static class SecuredUtils {
+
+        private SecuredUtils() {
+            // UTIL CLASS
+        }
+
+        @RolesAllowed("${sudo}")
+        public static String staticSecuredMethod() {
+            return ConfigProvider.getConfig().getValue("sudo", String.class);
         }
 
     }

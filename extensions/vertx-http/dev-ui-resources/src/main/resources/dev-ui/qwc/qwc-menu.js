@@ -1,18 +1,19 @@
 import { LitElement, html, css} from 'lit';
+import { html as staticHtml, unsafeStatic } from 'lit/static-html.js';
 import { devuiState } from 'devui-state';
 import { observeState } from 'lit-element-state';
 import { RouterController } from 'router-controller';
 import { StorageController } from 'storage-controller';
 import '@vaadin/icon';
+import '@vaadin/context-menu';
 
 /**
  * This component represent the Dev UI left menu
  * It creates the menuItems during build and dynamically add the routes and import the relevant components
  */
 export class QwcMenu extends observeState(LitElement) {
-    
-    storageControl = new StorageController(this);
     routerController = new RouterController(this);
+    storageControl = new StorageController(this);
     
     static styles = css`
             .left {
@@ -29,12 +30,8 @@ export class QwcMenu extends observeState(LitElement) {
             }
             
             .menuSizeControl {
-                align-self: flex-end;
                 cursor: pointer;
                 color: var(--lumo-contrast-10pct);
-                height: 60px;
-                width: 30px;
-                padding-top:30px;
             }
             
             .menuSizeControl:hover {
@@ -67,6 +64,7 @@ export class QwcMenu extends observeState(LitElement) {
                 color: var(--lumo-contrast-90pct);
                 height:30px;
                 text-decoration: none;
+                justify-content: space-between;
             }
             
             .item:hover{
@@ -80,9 +78,23 @@ export class QwcMenu extends observeState(LitElement) {
                 background-color: var(--lumo-primary-color-10pct);
             }
 
+            .itemref{
+                color: var(--lumo-contrast-90pct);
+                text-decoration: none;
+            }
+
+            .hidden {
+                display:none;
+            }
+
+            .bottom {
+                display: flex;
+                flex-direction: row;
+                align-items: center;
+            }
+
             .quarkusVersion {
-                padding-bottom: 10px;
-                padding-left: 15px;
+                padding-left: 5px;
                 width: 100%;
             }
     
@@ -103,6 +115,7 @@ export class QwcMenu extends observeState(LitElement) {
         _selectedPageLabel: {attribute: false},
         _width: {state: true},
         _customMenuNamespaces: {state: true},
+        _dynamicMenuNamespaces: {state: true},
     };
     
     constructor() {
@@ -112,12 +125,14 @@ export class QwcMenu extends observeState(LitElement) {
             this._updateSelection(event);
         });
         this._customMenuNamespaces = [];
+        this._dynamicMenuNamespaces = null;
     }
     
     connectedCallback() {
         super.connectedCallback();
         this._selectedPage = "devui-extensions"; // default
         this._selectedPageLabel = "Extensions"; // default
+        this._dynamicMenuNamespaces = this._restoreDynamicMenuItems();
         this._restoreState();
     }
     
@@ -134,25 +149,72 @@ export class QwcMenu extends observeState(LitElement) {
         let currentPage = this.routerController.getCurrentPage();
         this._selectedPageLabel = currentPage.title;
         this._selectedPage = currentPage.namespace;
+        this._selectedPageIsMax = !currentPage.includeInMenu; // TODO: introduce new property called isMaxView ?
     }
 
     render() {
         this._customMenuNamespaces = [];
+        let classnames = this._getClassNamesForMenu();
         return html`
-            <div class="left">
-                <div class="menu" style="width: ${this._width}px;" @dblclick=${this._doubleClicked}>
+            <div class="${classnames}">
+                <div class="menu" style="width: ${this._width}px;" @dblclick=${this._doubleClicked} @dragover="${this._handleDragOver}" @drop="${this._handleDrop}">
                     ${devuiState.menu.map((menuItem, index) =>
                         html`${this._renderItem(menuItem, index)}`
                     )}
-                    ${this._renderIcon("chevron-left", "smaller")}
-                    ${this._renderIcon("chevron-right", "larger")}
+                    ${this._dynamicMenuNamespaces.map((page) =>
+                        html`${this._renderCustomItem(page, -1)}`
+                    )}
                 </div>
 
-                ${this._renderVersion()}
+                ${this._renderBottom()}
             </div>`;
     }
 
-    _renderVersion(){
+    _handleDragOver(event) {
+        event.preventDefault();
+    }
+    
+    _handleDrop(event) {
+        event.preventDefault();
+    
+        const data = event.dataTransfer.getData('application/json');
+        if(data){
+            const customMenu = JSON.parse(data);
+    
+            let storedMenu = this._restoreDynamicMenuItems();
+        
+            const index = storedMenu.findIndex(obj => obj.id === customMenu.id);
+            if (index === -1) {
+                storedMenu.push(customMenu);
+            }
+        
+            this._storeDynamicMenuItems(storedMenu);
+            this._dynamicMenuNamespaces = this._restoreDynamicMenuItems();
+        }
+    }
+
+    _restoreDynamicMenuItems(){
+        let menu = this.storageControl.get('customPageLinks');
+        if(menu){
+            return JSON.parse(menu);
+        }else{
+            return [];
+        }
+    }
+    
+    _storeDynamicMenuItems(menu){
+        this.storageControl.set('customPageLinks', JSON.stringify(menu));
+    }
+
+    _renderBottom(){
+        return html`<div class="bottom">
+                        ${this._renderVersion()}
+                        ${this._renderIcon("chevron-left", "smaller")}
+                        ${this._renderIcon("chevron-right", "larger")}
+                    </div>`;
+    }
+    
+    _renderVersion(){    
         if(this._show){
             return html`<div class="quarkusVersion">
                             <span @click="${this._quarkus}">Quarkus ${devuiState.applicationInfo.quarkusVersion}</span>
@@ -160,13 +222,46 @@ export class QwcMenu extends observeState(LitElement) {
         }
     }
 
+    _renderCustomItem(page, index){
+        if(page){
+            const index = devuiState.cards.active.findIndex(obj => obj.namespace === page.namespace); // Only show if that extension is added
+            if (index !== -1) {
+            
+                let extensionName = "";
+                if(page.metadata && page.metadata.extensionName){
+                    extensionName = page.metadata.extensionName;
+                }
+            
+                let items = [{ text: 'Remove', action: 'remove', id: page.id , namespace: page.namespace}];
+                return html`<vaadin-context-menu .items=${items} @item-selected=${this._handleContextMenu} title="${extensionName}">
+                            ${this._renderItem(page, -1)}
+                        </vaadin-context-menu>`;
+            }
+        }
+    }
+    
+    _handleContextMenu(event){
+        const selectedItem = event.detail.value;
+        if (selectedItem && selectedItem.action === 'remove') {
+            let storedMenu = this._restoreDynamicMenuItems();
+            const index = storedMenu.findIndex(obj => obj.id === selectedItem.id);
+            if (index !== -1) {
+                storedMenu.splice(index, 1);
+            }
+            this._storeDynamicMenuItems(storedMenu);
+            this._dynamicMenuNamespaces = this._restoreDynamicMenuItems();  
+        }
+    }
+    
     _renderItem(page, index){
         
         var defaultSelection = false;
         if(index===0)defaultSelection = true;
-        import(page.componentRef);
-        this.routerController.addRouteForMenu(page, defaultSelection);
-
+        if(page.componentRef){
+            import(page.componentRef);
+            this.routerController.addRouteForMenu(page, defaultSelection);
+        }
+        
         // Each namespace has one place on the menu
         if(!this._customMenuNamespaces.includes(page.namespace)){
             this._customMenuNamespaces.push(page.namespace);
@@ -178,20 +273,38 @@ export class QwcMenu extends observeState(LitElement) {
                     displayName = page.title;
                 }
             }
-        
-            let pageRef = this.routerController.getPageUrlFor(page);
             
-            let classnames = this._getClassNames(page, index);
-            return html`
-            <a class="${classnames}" href="${pageRef}">
-                <vaadin-icon icon="${page.icon}"></vaadin-icon>
-                <span class="item-text" data-page="${page.componentName}">${displayName}</span>
-            </a>
-            `;        
+            let classnames = this._getClassNamesForMenuItem(page, index);
+            return html`<div class="${classnames}" @click=${() => this.routerController.go(page)}>
+                    <div>
+                        <vaadin-icon icon="${page.icon}"></vaadin-icon>
+                        <span class="item-text" data-page="${page.componentName}">${displayName}</span>
+                    </div>
+                    ${this._renderMenuAction(page, classnames)}
+                </div>`;
         }
     }
 
-    _getClassNames(page, index){
+    _renderMenuAction(page, classnames){
+        if(page.menuActionComponent && this._show && classnames.includes("selected")){
+            import(`./${page.menuActionComponent}.js`);
+            
+            const tagName = unsafeStatic(page.menuActionComponent);
+            return staticHtml`<${tagName}></${tagName}>`;
+        }
+    }
+
+    _getClassNamesForMenu(){
+        if(this._selectedPageIsMax){
+            return "hidden";
+        }
+        return "left";
+    }
+
+    _getClassNamesForMenuItem(page, index){
+        if(!page.includeInMenu ){
+            return "hidden";
+        }
         
         const selected = this._selectedPage == page.namespace;
         if(selected){
@@ -206,7 +319,11 @@ export class QwcMenu extends observeState(LitElement) {
                 hasMenuItem = true;
             }
         }
-
+        if(!hasMenuItem){
+            // Check the dynamic pages
+            hasMenuItem = this._dynamicMenuNamespaces.some(item => item.namespace === this._selectedPage);
+        }
+        
         if(!hasMenuItem && index === 0){
             return "item selected";
         }
@@ -215,7 +332,11 @@ export class QwcMenu extends observeState(LitElement) {
     }
 
     _renderIcon(icon, action){
-        if((action == "smaller" && this._show) || (action == "larger" && !this._show)){
+        if(action == "smaller" && this._show){
+            return html`
+                <vaadin-icon class="menuSizeControl" icon="font-awesome-solid:${icon}" @click="${this._changeMenuSize}" data-action="${action}"></vaadin-icon>
+            `;
+        }else if(action == "larger" && !this._show){
             return html`
                 <vaadin-icon class="menuSizeControl" icon="font-awesome-solid:${icon}" @click="${this._changeMenuSize}" data-action="${action}"></vaadin-icon>
             `;

@@ -8,14 +8,7 @@ import static io.quarkus.vertx.core.runtime.SSLConfigHelper.configurePfxTrustOpt
 import static io.vertx.core.file.impl.FileResolverImpl.CACHE_DIR_BASE_PROP_NAME;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
@@ -29,17 +22,12 @@ import java.util.function.Supplier;
 
 import org.jboss.logging.Logger;
 import org.jboss.threads.ContextHandler;
-import org.wildfly.common.cpu.ProcessorInfo;
 
 import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.FastThreadLocal;
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.InstanceHandle;
-import io.quarkus.runtime.ExecutorRecorder;
-import io.quarkus.runtime.IOThreadDetector;
-import io.quarkus.runtime.LaunchMode;
-import io.quarkus.runtime.ShutdownContext;
-import io.quarkus.runtime.ThreadPoolConfig;
+import io.quarkus.runtime.*;
 import io.quarkus.runtime.annotations.Recorder;
 import io.quarkus.vertx.core.runtime.config.AddressResolverConfiguration;
 import io.quarkus.vertx.core.runtime.config.ClusterConfiguration;
@@ -48,6 +36,8 @@ import io.quarkus.vertx.core.runtime.config.VertxConfiguration;
 import io.quarkus.vertx.core.runtime.context.VertxContextSafetyToggle;
 import io.quarkus.vertx.mdc.provider.LateBoundMDCProvider;
 import io.quarkus.vertx.runtime.VertxCurrentContextFactory;
+import io.quarkus.vertx.runtime.jackson.QuarkusJacksonFactory;
+import io.smallrye.common.cpu.ProcessorInfo;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Context;
 import io.vertx.core.Handler;
@@ -66,6 +56,8 @@ import io.vertx.core.spi.resolver.ResolverProvider;
 
 @Recorder
 public class VertxCoreRecorder {
+
+    private static final String LOGGER_FACTORY_NAME_SYS_PROP = "vertx.logger-delegate-factory-class-name";
 
     static {
         System.setProperty("vertx.disableTCCL", "true");
@@ -100,6 +92,7 @@ public class VertxCoreRecorder {
     public Supplier<Vertx> configureVertx(VertxConfiguration config, ThreadPoolConfig threadPoolConfig,
             LaunchMode launchMode, ShutdownContext shutdown, List<Consumer<VertxOptions>> customizers,
             ExecutorService executorProxy) {
+        // The wrapper previously here to prevent the executor to be shutdown prematurely is moved to higher level to the io.quarkus.runtime.ExecutorRecorder
         QuarkusExecutorFactory.sharedExecutor = executorProxy;
         if (launchMode != LaunchMode.DEVELOPMENT) {
             vertx = new VertxSupplier(launchMode, config, customizers, threadPoolConfig, shutdown);
@@ -156,9 +149,16 @@ public class VertxCoreRecorder {
         ClassLoader cl = Thread.currentThread().getContextClassLoader();
         synchronized (devModeThreads) {
             currentDevModeNewThreadCreationClassLoader = cl;
+            // Collect terminated threads to remove them from the set. It will avoid iterating over them in the future.
+            List<Thread> terminated = new ArrayList<>();
             for (var t : devModeThreads) {
-                t.setContextClassLoader(cl);
+                if (t.getState() == Thread.State.TERMINATED) {
+                    terminated.add(t);
+                } else {
+                    t.setContextClassLoader(cl);
+                }
             }
+            terminated.forEach(devModeThreads::remove);
         }
     }
 
@@ -318,6 +318,11 @@ public class VertxCoreRecorder {
 
         String fileCacheDir = System.getProperty(CACHE_DIR_BASE_PROP_NAME);
         if (fileCacheDir == null) {
+            fileCacheDir = conf.cacheDirectory().orElse(null);
+        }
+
+        if (fileCacheDir == null) {
+            // If not set, make sure we can create a directory in the temp directory.
             File tmp = new File(System.getProperty("java.io.tmpdir", ".") + File.separator + VERTX_CACHE);
             boolean cacheDirRequired = conf.caching() || conf.classpathResolving();
             if (!tmp.isDirectory() && cacheDirRequired) {
@@ -350,6 +355,8 @@ public class VertxCoreRecorder {
                     });
                 }
             }
+        } else {
+            fileSystemOptions.setFileCacheDir(fileCacheDir);
         }
 
         options.setFileSystemOptions(fileSystemOptions);
@@ -378,8 +385,7 @@ public class VertxCoreRecorder {
     }
 
     private static File getRandomDirectory(File tmp) {
-        long random = Math.abs(UUID.randomUUID().getMostSignificantBits());
-        File cache = new File(tmp, Long.toString(random));
+        File cache = new File(tmp, Long.toString(new Random().nextLong()));
         if (cache.isDirectory()) {
             // Do not reuse an existing directory.
             return getRandomDirectory(tmp);
@@ -427,6 +433,7 @@ public class VertxCoreRecorder {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Exception when closing Vert.x instance", e);
             }
+            VertxMDC.INSTANCE.clear();
             LateBoundMDCProvider.setMDCProviderDelegate(null);
             vertx = null;
         }
@@ -493,6 +500,27 @@ public class VertxCoreRecorder {
         opts.setCacheNegativeTimeToLive(ar.cacheNegativeTimeToLive());
         opts.setMaxQueries(ar.maxQueries());
         opts.setQueryTimeout(ar.queryTimeout().toMillis());
+        opts.setHostsRefreshPeriod(ar.hostRefreshPeriod());
+        opts.setOptResourceEnabled(ar.optResourceEnabled());
+        opts.setRdFlag(ar.rdFlag());
+        opts.setNdots(ar.ndots());
+        opts.setRoundRobinInetAddress(ar.roundRobinInetAddress());
+
+        if (ar.hostsPath().isPresent()) {
+            opts.setHostsPath(ar.hostsPath().get());
+        }
+
+        if (ar.servers().isPresent()) {
+            opts.setServers(ar.servers().get());
+        }
+
+        if (ar.searchDomains().isPresent()) {
+            opts.setSearchDomains(ar.searchDomains().get());
+        }
+
+        if (ar.rotateServers().isPresent()) {
+            opts.setRotateServers(ar.rotateServers().get());
+        }
 
         options.setAddressResolverOptions(opts);
     }
@@ -545,6 +573,15 @@ public class VertxCoreRecorder {
         };
     }
 
+    public void resetMapper(ShutdownContext shutdown) {
+        shutdown.addShutdownTask(new Runnable() {
+            @Override
+            public void run() {
+                QuarkusJacksonFactory.reset();
+            }
+        });
+    }
+
     private static void setNewThreadTccl(VertxThread thread) {
         ClassLoader cl = VertxCoreRecorder.currentDevModeNewThreadCreationClassLoader;
         if (cl == null) {
@@ -555,7 +592,22 @@ public class VertxCoreRecorder {
         thread.setContextClassLoader(cl);
     }
 
-    public ContextHandler<Object> executionContextHandler() {
+    public RuntimeValue<List<String>> getIgnoredArcContextKeysSupplier() {
+        final VertxCurrentContextFactory currentContextFactory = (VertxCurrentContextFactory) Arc.container()
+                .getCurrentContextFactory();
+        return new RuntimeValue<>(currentContextFactory.keys());
+    }
+
+    public ContextHandler<Object> executionContextHandler(List<RuntimeValue<List<String>>> ignoredKeysSuppliers) {
+        final List<String> ignoredKeys;
+        if (ignoredKeysSuppliers.isEmpty()) {
+            ignoredKeys = null;
+        } else {
+            ignoredKeys = new ArrayList<>();
+            for (RuntimeValue<List<String>> ignoredKeysSupplier : ignoredKeysSuppliers) {
+                ignoredKeys.addAll(ignoredKeysSupplier.getValue());
+            }
+        }
         return new ContextHandler<Object>() {
             @Override
             public Object captureContext() {
@@ -565,17 +617,20 @@ public class VertxCoreRecorder {
             @Override
             public void runWith(Runnable task, Object context) {
                 ContextInternal currentContext = (ContextInternal) Vertx.currentContext();
+                // Only do context handling if it's non-null
                 if (context != null && context != currentContext) {
-                    // Only do context handling if it's non-null
                     ContextInternal vertxContext = (ContextInternal) context;
-                    // The CDI request context must not be propagated
-                    ConcurrentMap<Object, Object> local = vertxContext.localContextData();
-                    if (local.containsKey(VertxCurrentContextFactory.LOCAL_KEY)) {
-                        // Duplicate the context, copy the data, remove the request context
-                        vertxContext = vertxContext.duplicate();
-                        vertxContext.localContextData().putAll(local);
-                        vertxContext.localContextData().remove(VertxCurrentContextFactory.LOCAL_KEY);
-                        VertxContextSafetyToggle.setContextSafe(vertxContext, true);
+                    // The CDI contexts must not be propagated
+                    // First test if VertxCurrentContextFactory is actually used
+                    if (ignoredKeys != null) {
+                        ConcurrentMap<Object, Object> local = vertxContext.localContextData();
+                        if (containsIgnoredKey(ignoredKeys, local)) {
+                            // Duplicate the context, copy the data, remove the request context
+                            vertxContext = vertxContext.duplicate();
+                            vertxContext.localContextData().putAll(local);
+                            ignoredKeys.forEach(vertxContext.localContextData()::remove);
+                            VertxContextSafetyToggle.setContextSafe(vertxContext, true);
+                        }
                     }
                     vertxContext.beginDispatch();
                     try {
@@ -587,12 +642,36 @@ public class VertxCoreRecorder {
                     task.run();
                 }
             }
+
+            private boolean containsIgnoredKey(List<String> keys, Map<Object, Object> localContextData) {
+                if (keys.isEmpty()) {
+                    return false;
+                }
+                if (keys.size() == 1) {
+                    // Very often there will be only one key used
+                    return localContextData.containsKey(keys.get(0));
+                } else {
+                    for (String key : keys) {
+                        if (localContextData.containsKey(key)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
         };
     }
 
     public static Supplier<Vertx> recoverFailedStart(VertxConfiguration config, ThreadPoolConfig threadPoolConfig) {
         return vertx = new VertxSupplier(LaunchMode.DEVELOPMENT, config, Collections.emptyList(), threadPoolConfig, null);
 
+    }
+
+    public void configureQuarkusLoggerFactory() {
+        String loggerClassName = System.getProperty(LOGGER_FACTORY_NAME_SYS_PROP);
+        if (loggerClassName == null) {
+            System.setProperty(LOGGER_FACTORY_NAME_SYS_PROP, VertxLogDelegateFactory.class.getName());
+        }
     }
 
     static class VertxSupplier implements Supplier<Vertx> {

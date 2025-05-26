@@ -10,19 +10,23 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 import jakarta.inject.Inject;
+import jakarta.persistence.Cache;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.metamodel.Metamodel;
 
-import org.eclipse.microprofile.config.ConfigProvider;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.StatelessSession;
 import org.hibernate.boot.archive.scan.spi.Scanner;
 import org.hibernate.engine.spi.SessionLazyDelegator;
 import org.hibernate.integrator.spi.Integrator;
+import org.hibernate.relational.SchemaManager;
 import org.jboss.logging.Logger;
 
 import io.quarkus.arc.SyntheticCreationalContext;
 import io.quarkus.arc.runtime.BeanContainer;
 import io.quarkus.arc.runtime.BeanContainerListener;
+import io.quarkus.hibernate.orm.PersistenceUnit;
 import io.quarkus.hibernate.orm.runtime.boot.QuarkusPersistenceUnitDefinition;
 import io.quarkus.hibernate.orm.runtime.integration.HibernateOrmIntegrationRuntimeDescriptor;
 import io.quarkus.hibernate.orm.runtime.migration.MultiTenancyStrategy;
@@ -83,12 +87,11 @@ public class HibernateOrmRecorder {
 
     public Supplier<DataSourceTenantConnectionResolver> dataSourceTenantConnectionResolver(String persistenceUnitName,
             Optional<String> dataSourceName,
-            MultiTenancyStrategy multiTenancyStrategy, String multiTenancySchemaDataSourceName) {
+            MultiTenancyStrategy multiTenancyStrategy) {
         return new Supplier<DataSourceTenantConnectionResolver>() {
             @Override
             public DataSourceTenantConnectionResolver get() {
-                return new DataSourceTenantConnectionResolver(persistenceUnitName, dataSourceName, multiTenancyStrategy,
-                        multiTenancySchemaDataSourceName);
+                return new DataSourceTenantConnectionResolver(persistenceUnitName, dataSourceName, multiTenancyStrategy);
             }
         };
     }
@@ -148,16 +151,96 @@ public class HibernateOrmRecorder {
         };
     }
 
-    public void doValidation(String puName) {
-        Optional<String> val;
-        if (puName.equals(PersistenceUnitUtil.DEFAULT_PERSISTENCE_UNIT_NAME)) {
-            val = ConfigProvider.getConfig().getOptionalValue("quarkus.hibernate-orm.database.generation", String.class);
+    public Function<SyntheticCreationalContext<CriteriaBuilder>, CriteriaBuilder> criteriaBuilderSupplier(
+            String persistenceUnitName) {
+
+        return sessionFactoryFunctionSupplier(persistenceUnitName,
+                new Function<SessionFactory, CriteriaBuilder>() {
+                    @Override
+                    public CriteriaBuilder apply(SessionFactory sessionFactory) {
+                        return sessionFactory.getCriteriaBuilder();
+                    }
+                });
+    }
+
+    public Function<SyntheticCreationalContext<Metamodel>, Metamodel> metamodelSupplier(
+            String persistenceUnitName) {
+
+        return sessionFactoryFunctionSupplier(persistenceUnitName,
+                new Function<SessionFactory, Metamodel>() {
+                    @Override
+                    public Metamodel apply(SessionFactory sessionFactory) {
+                        return sessionFactory.getMetamodel();
+                    }
+                });
+    }
+
+    public Function<SyntheticCreationalContext<Cache>, Cache> cacheSupplier(
+            String persistenceUnitName) {
+
+        return sessionFactoryFunctionSupplier(persistenceUnitName,
+                new Function<SessionFactory, Cache>() {
+                    @Override
+                    public Cache apply(SessionFactory sessionFactory) {
+                        return sessionFactory.getCache();
+                    }
+                });
+    }
+
+    public Function<SyntheticCreationalContext<jakarta.persistence.PersistenceUnitUtil>, jakarta.persistence.PersistenceUnitUtil> persistenceUnitUtilSupplier(
+            String persistenceUnitName) {
+
+        return sessionFactoryFunctionSupplier(persistenceUnitName,
+                new Function<SessionFactory, jakarta.persistence.PersistenceUnitUtil>() {
+                    @Override
+                    public jakarta.persistence.PersistenceUnitUtil apply(SessionFactory sessionFactory) {
+                        return sessionFactory.getPersistenceUnitUtil();
+                    }
+                });
+    }
+
+    public Function<SyntheticCreationalContext<SchemaManager>, SchemaManager> schemaManagerSupplier(
+            String persistenceUnitName) {
+
+        return sessionFactoryFunctionSupplier(persistenceUnitName,
+                new Function<SessionFactory, SchemaManager>() {
+                    @Override
+                    public SchemaManager apply(SessionFactory sessionFactory) {
+                        return sessionFactory.getSchemaManager();
+                    }
+                });
+    }
+
+    private <T> Function<SyntheticCreationalContext<T>, T> sessionFactoryFunctionSupplier(
+            final String persistenceUnitName,
+            final Function<SessionFactory, T> sessionFactoryMapper) {
+        return new Function<SyntheticCreationalContext<T>, T>() {
+            @Override
+            public T apply(SyntheticCreationalContext<T> context) {
+                SessionFactory sessionFactory = getSessionFactoryFromContext(context, persistenceUnitName);
+                return sessionFactoryMapper.apply(sessionFactory);
+            }
+        };
+    }
+
+    private SessionFactory getSessionFactoryFromContext(SyntheticCreationalContext<?> context, String persistenceUnitName) {
+        Class<SessionFactory> sfBeanType = SessionFactory.class;
+        if (PersistenceUnitUtil.isDefaultPersistenceUnit(persistenceUnitName)) {
+            return context.getInjectedReference(sfBeanType);
         } else {
-            val = ConfigProvider.getConfig().getOptionalValue("quarkus.hibernate-orm.\"" + puName + "\".database.generation",
-                    String.class);
+            PersistenceUnit.PersistenceUnitLiteral qualifier = new PersistenceUnit.PersistenceUnitLiteral(persistenceUnitName);
+            return context.getInjectedReference(sfBeanType, qualifier);
         }
+    }
+
+    public void doValidation(HibernateOrmRuntimeConfig hibernateOrmRuntimeConfig, String puName) {
+        HibernateOrmRuntimeConfigPersistenceUnit hibernateOrmRuntimeConfigPersistenceUnit = hibernateOrmRuntimeConfig
+                .persistenceUnits().get(puName);
+        String schemaManagementStrategy = hibernateOrmRuntimeConfigPersistenceUnit.database().generation().generation()
+                .orElse(hibernateOrmRuntimeConfigPersistenceUnit.schemaManagement().strategy());
+
         //if hibernate is already managing the schema we don't do this
-        if (val.isPresent() && !val.get().equals("none")) {
+        if (!"none".equals(schemaManagementStrategy)) {
             return;
         }
         new Thread(new Runnable() {
@@ -166,6 +249,5 @@ public class HibernateOrmRecorder {
                 SchemaManagementIntegrator.runPostBootValidation(puName);
             }
         }, "Hibernate post-boot validation thread for " + puName).start();
-
     }
 }

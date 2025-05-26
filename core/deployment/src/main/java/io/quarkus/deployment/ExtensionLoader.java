@@ -13,6 +13,8 @@ import static io.quarkus.deployment.util.ReflectUtil.rawTypeOfParameter;
 import static java.util.Arrays.asList;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -23,6 +25,7 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.lang.reflect.UndeclaredThrowableException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -98,7 +101,7 @@ import io.quarkus.runtime.annotations.ConfigRoot;
 import io.quarkus.runtime.annotations.Recorder;
 import io.quarkus.runtime.configuration.QuarkusConfigFactory;
 import io.quarkus.runtime.util.HashUtil;
-import io.smallrye.config.ConfigMappings.ConfigClassWithPrefix;
+import io.smallrye.config.ConfigMappings.ConfigClass;
 import io.smallrye.config.SmallRyeConfig;
 
 /**
@@ -129,12 +132,14 @@ public final class ExtensionLoader {
      * @throws IOException if the class loader could not load a resource
      * @throws ClassNotFoundException if a build step class is not found
      */
-    public static Consumer<BuildChainBuilder> loadStepsFrom(ClassLoader classLoader, Properties buildSystemProps,
+    public static Consumer<BuildChainBuilder> loadStepsFrom(ClassLoader classLoader,
+            Properties buildSystemProps, Properties runtimeProperties,
             ApplicationModel appModel, LaunchMode launchMode, DevModeType devModeType)
             throws IOException, ClassNotFoundException {
 
         final BuildTimeConfigurationReader reader = new BuildTimeConfigurationReader(classLoader);
-        final SmallRyeConfig src = reader.initConfiguration(launchMode, buildSystemProps, appModel.getPlatformProperties());
+        final SmallRyeConfig src = reader.initConfiguration(launchMode, buildSystemProps, runtimeProperties,
+                appModel.getPlatformProperties());
         // install globally
         QuarkusConfigFactory.setConfig(src);
         final BuildTimeConfigurationReader.ReadResult readResult = reader.readConfiguration(src);
@@ -167,7 +172,7 @@ public final class ExtensionLoader {
 
         // this has to be an identity hash map else the recorder will get angry
         Map<Object, FieldDescriptor> rootFields = new IdentityHashMap<>();
-        Map<Object, ConfigClassWithPrefix> mappingClasses = new IdentityHashMap<>();
+        Map<Object, ConfigClass> mappingClasses = new IdentityHashMap<>();
         for (Map.Entry<Class<?>, Object> entry : proxies.entrySet()) {
             // ConfigRoot
             RootDefinition root = readResult.getAllRootsByClass().get(entry.getKey());
@@ -177,7 +182,7 @@ public final class ExtensionLoader {
             }
 
             // ConfigMapping
-            ConfigClassWithPrefix mapping = readResult.getAllMappings().get(entry.getKey());
+            ConfigClass mapping = readResult.getAllMappingsByClass().get(entry.getKey());
             if (mapping != null) {
                 mappingClasses.put(entry.getValue(), mapping);
                 continue;
@@ -205,7 +210,7 @@ public final class ExtensionLoader {
                 ObjectLoader mappingLoader = new ObjectLoader() {
                     @Override
                     public ResultHandle load(final BytecodeCreator body, final Object obj, final boolean staticInit) {
-                        ConfigClassWithPrefix mapping = mappingClasses.get(obj);
+                        ConfigClass mapping = mappingClasses.get(obj);
                         MethodDescriptor getConfig = MethodDescriptor.ofMethod(ConfigProvider.class, "getConfig", Config.class);
                         ResultHandle config = body.invokeStaticMethod(getConfig);
                         MethodDescriptor getMapping = MethodDescriptor.ofMethod(SmallRyeConfig.class, "getConfigMapping",
@@ -432,6 +437,7 @@ public final class ExtensionLoader {
         final List<Method> methods = getMethods(clazz);
         final Map<String, List<Method>> nameToMethods = methods.stream().collect(Collectors.groupingBy(m -> m.getName()));
 
+        MethodHandles.Lookup lookup = MethodHandles.publicLookup();
         for (Method method : methods) {
             final BuildStep buildStep = method.getAnnotation(BuildStep.class);
             if (buildStep == null) {
@@ -785,6 +791,7 @@ public final class ExtensionLoader {
                 stepId = name;
             }
 
+            MethodHandle methodHandle = unreflect(method, lookup);
             chainConfig = chainConfig
                     .andThen(bcb -> {
                         BuildStepBuilder bsb = bcb.addBuildStep(new io.quarkus.builder.BuildStep() {
@@ -846,17 +853,13 @@ public final class ExtensionLoader {
                                 }
                                 Object result;
                                 try {
-                                    result = method.invoke(instance, methodArgs);
+                                    result = methodHandle.bindTo(instance).invokeWithArguments(methodArgs);
                                 } catch (IllegalAccessException e) {
                                     throw ReflectUtil.toError(e);
-                                } catch (InvocationTargetException e) {
-                                    try {
-                                        throw e.getCause();
-                                    } catch (RuntimeException | Error e2) {
-                                        throw e2;
-                                    } catch (Throwable t) {
-                                        throw new IllegalStateException(t);
-                                    }
+                                } catch (RuntimeException | Error e2) {
+                                    throw e2;
+                                } catch (Throwable t) {
+                                    throw new UndeclaredThrowableException(t);
                                 }
                                 resultConsumer.accept(bc, result);
                                 if (isRecorder) {
@@ -883,6 +886,15 @@ public final class ExtensionLoader {
                     });
         }
         return chainConfig;
+    }
+
+    private static MethodHandle unreflect(Method method, MethodHandles.Lookup lookup) {
+        try {
+            return lookup.unreflect(method);
+        } catch (IllegalAccessException e) {
+            throw ReflectUtil.toError(e);
+        }
+
     }
 
     private static BooleanSupplier and(BooleanSupplier addStep, BooleanSupplierFactoryBuildItem supplierFactory,

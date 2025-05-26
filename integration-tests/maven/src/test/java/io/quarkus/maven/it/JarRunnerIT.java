@@ -3,6 +3,7 @@ package io.quarkus.maven.it;
 import static io.quarkus.maven.it.ApplicationNameAndVersionTestUtil.assertApplicationPropertiesSetCorrectly;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
+import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.awaitility.Awaitility.await;
 
 import java.io.BufferedReader;
@@ -210,7 +211,7 @@ public class JarRunnerIT extends MojoTestBase {
         MavenProcessInvocationResult result = running
                 .execute(Arrays.asList("package",
                         "-DskipTests",
-                        "-Dquarkus.package.type=legacy-jar"), Collections.emptyMap());
+                        "-Dquarkus.package.jar.type=legacy-jar"), Collections.emptyMap());
 
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
                 .until(() -> result.getProcess() != null && !result.getProcess().isAlive());
@@ -255,7 +256,7 @@ public class JarRunnerIT extends MojoTestBase {
 
             String logs = FileUtils.readFileToString(output, "UTF-8");
 
-            assertThat(logs).isNotEmpty().contains("resteasy-reactive");
+            assertThat(logs).isNotEmpty().contains("rest");
 
             // test that the application name and version are properly set
             assertApplicationPropertiesSetCorrectly();
@@ -273,7 +274,7 @@ public class JarRunnerIT extends MojoTestBase {
 
         // The default build
         MavenProcessInvocationResult result = running
-                .execute(List.of("package", "-DskipTests", "-Dquarkus.package.type=mutable-jar",
+                .execute(List.of("package", "-DskipTests", "-Dquarkus.package.jar.type=mutable-jar",
                         "-Dquarkus.analytics.disabled=true"), Map.of());
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
                 .until(() -> result.getProcess() != null && !result.getProcess().isAlive());
@@ -368,7 +369,7 @@ public class JarRunnerIT extends MojoTestBase {
 
         // The default build
         MavenProcessInvocationResult result = running
-                .execute(List.of("package", "-DskipTests", "-Dquarkus.package.type=mutable-jar"), Map.of());
+                .execute(List.of("package", "-DskipTests", "-Dquarkus.package.jar.type=mutable-jar"), Map.of());
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
                 .until(() -> result.getProcess() != null && !result.getProcess().isAlive());
         assertThat(running.log()).containsIgnoringCase("BUILD SUCCESS");
@@ -480,8 +481,8 @@ public class JarRunnerIT extends MojoTestBase {
         RunningInvoker running = new RunningInvoker(testDir, false);
 
         MavenProcessInvocationResult result = running
-                .execute(Arrays.asList("package", "-DskipTests", "-Dquarkus.package.type=mutable-jar",
-                        "-Dquarkus.package.user-providers-directory=" + providersDir), Collections.emptyMap());
+                .execute(Arrays.asList("package", "-DskipTests", "-Dquarkus.package.jar.type=mutable-jar",
+                        "-Dquarkus.package.jar.user-providers-directory=" + providersDir), Collections.emptyMap());
 
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
                 .until(() -> result.getProcess() != null && !result.getProcess().isAlive());
@@ -612,11 +613,13 @@ public class JarRunnerIT extends MojoTestBase {
         RunningInvoker running = new RunningInvoker(testDir, false);
 
         MavenProcessInvocationResult result = running
-                .execute(Arrays.asList("package", "-DskipTests", "-Dquarkus.package.create-appcds=true"),
+                .execute(Arrays.asList("package", "-DskipTests", "-Dquarkus.package.jar.appcds.enabled=true"),
                         Collections.emptyMap());
 
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
                 .until(() -> result.getProcess() != null && !result.getProcess().isAlive());
+        // just skip if the JDK can't create appcds
+        assumeThat(running.log()).doesNotContainIgnoringCase("Unable to create AppCDS");
         assertThat(running.log()).containsIgnoringCase("BUILD SUCCESS");
         running.stop();
 
@@ -814,7 +817,7 @@ public class JarRunnerIT extends MojoTestBase {
         MavenProcessInvocationResult result = running
                 .execute(Arrays.asList("package",
                         "-DskipTests",
-                        "-Dquarkus.package.type=fast-jar",
+                        "-Dquarkus.package.jar.type=fast-jar",
                         outputDir == null ? "" : "-Dquarkus.package.output-directory=" + outputDir), Collections.emptyMap());
 
         await().atMost(TestUtils.getDefaultTimeout(), TimeUnit.MINUTES)
@@ -854,7 +857,7 @@ public class JarRunnerIT extends MojoTestBase {
 
             String logs = FileUtils.readFileToString(output, "UTF-8");
 
-            assertThat(logs).isNotEmpty().contains("resteasy-reactive");
+            assertThat(logs).isNotEmpty().contains("rest");
 
             // test that the application name and version are properly set
             assertApplicationPropertiesSetCorrectly();

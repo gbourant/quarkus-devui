@@ -2,7 +2,9 @@ package io.quarkus.it.keycloak;
 
 import java.security.PublicKey;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Set;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.ws.rs.BadRequestException;
@@ -39,6 +41,8 @@ public class OidcResource {
     private volatile boolean rotate;
     private volatile int jwkEndpointCallCount;
     private volatile int introspectionEndpointCallCount;
+    private volatile int opaqueToken2UsageCount;
+    private volatile int opaqueToken3UsageCount;
     private volatile int revokeEndpointCallCount;
     private volatile int userInfoEndpointCallCount;
     private volatile boolean enableDiscovery = true;
@@ -112,6 +116,20 @@ public class OidcResource {
     }
 
     @POST
+    @Path("opaque-token-call-count")
+    public int resetOpaqueTokenCallCount() {
+        opaqueToken2UsageCount = 0;
+        return opaqueToken2UsageCount;
+    }
+
+    @POST
+    @Path("opaque-token-3-call-count")
+    public int resetOpaqueToken3CallCount() {
+        opaqueToken3UsageCount = 0;
+        return opaqueToken3UsageCount;
+    }
+
+    @POST
     @Produces("application/json")
     @Path("introspect")
     public String introspect(@FormParam("client_id") String clientId, @FormParam("client_secret") String clientSecret,
@@ -119,7 +137,27 @@ public class OidcResource {
         introspectionEndpointCallCount++;
 
         boolean activeStatus = introspection && !token.endsWith("-invalid");
-
+        String requiredClaim = "\"required_claim\": \"1\",";
+        if (token.endsWith("_2") && ++opaqueToken2UsageCount == 2) {
+            // This is to confirm that the same opaque token_2 works well when its introspection response
+            // includes `required_claim` with value "1" but fails when the required claim is not included
+            requiredClaim = "";
+        }
+        if (token.endsWith("_3")) {
+            ++opaqueToken3UsageCount;
+            // This is to confirm that the same opaque token_3 works well when its introspection response
+            // includes `required_claim` with values "1,2" but fails when the required claim is not included
+            // or when required claim value is just "1"
+            if (opaqueToken3UsageCount == 2) {
+                requiredClaim = "\"required_claim\": [\"1\"],";
+            }
+            if (opaqueToken3UsageCount == 3) {
+                requiredClaim = "";
+            }
+            if (opaqueToken3UsageCount == 4) {
+                requiredClaim = "\"required_claim\": [\"1\", \"2\"],";
+            }
+        }
         String introspectionClientId = "none";
         String introspectionClientSecret = "none";
         if (clientSecret != null) {
@@ -128,7 +166,7 @@ public class OidcResource {
             JWTParser parser = new DefaultJWTParser();
             // "client-introspection-only" is a client id, set as an issuer by default
             JWTAuthContextInfo contextInfo = new JWTAuthContextInfo(verificationKey, "client-introspection-only");
-            contextInfo.setSignatureAlgorithm(SignatureAlgorithm.ES256);
+            contextInfo.setSignatureAlgorithm(Set.of(SignatureAlgorithm.ES256));
             JsonWebToken jwt = parser.parse(clientSecret, contextInfo);
             clientId = jwt.getIssuer();
         } else if (authorization != null) {
@@ -145,6 +183,7 @@ public class OidcResource {
                 "   \"scope\": \"user\"," +
                 "   \"email\": \"user@gmail.com\"," +
                 "   \"username\": \"alice\"," +
+                requiredClaim +
                 "   \"introspection_client_id\": \"" + introspectionClientId + "\"," +
                 "   \"introspection_client_secret\": \"" + introspectionClientSecret + "\"," +
                 "   \"client_id\": \"" + clientId + "\"" +
@@ -228,6 +267,17 @@ public class OidcResource {
     }
 
     @POST
+    @Path("accesstoken-with-acr")
+    @Produces("application/json")
+    public String testAccessTokenWithAcr(@QueryParam("acr") String acr, @QueryParam("auth_time") String authTime) {
+        return "{\"access_token\": \"" + jwt(null, "123456789", "1", false, acr, authTime)
+                + "\"," +
+                "   \"token_type\": \"Bearer\"," +
+                "   \"refresh_token\": \"123456789\"," +
+                "   \"expires_in\": 300 }";
+    }
+
+    @POST
     @Path("accesstoken")
     @Produces("application/json")
     public String testAccessToken(@QueryParam("kid") String kid, @QueryParam("sub") String subject) {
@@ -250,8 +300,28 @@ public class OidcResource {
     @POST
     @Path("opaque-token")
     @Produces("application/json")
-    public String testOpaqueToken(@QueryParam("kid") String kid) {
+    public String testOpaqueToken() {
         return "{\"access_token\": \"987654321\"," +
+                "   \"token_type\": \"Bearer\"," +
+                "   \"refresh_token\": \"123456789\"," +
+                "   \"expires_in\": 300 }";
+    }
+
+    @POST
+    @Path("opaque-token2")
+    @Produces("application/json")
+    public String testOpaqueToken2() {
+        return "{\"access_token\": \"987654321_2\"," +
+                "   \"token_type\": \"Bearer\"," +
+                "   \"refresh_token\": \"123456789\"," +
+                "   \"expires_in\": 300 }";
+    }
+
+    @POST
+    @Path("opaque-token3")
+    @Produces("application/json")
+    public String testOpaqueToken3() {
+        return "{\"access_token\": \"987654321_3\"," +
                 "   \"token_type\": \"Bearer\"," +
                 "   \"refresh_token\": \"123456789\"," +
                 "   \"expires_in\": 300 }";
@@ -304,6 +374,10 @@ public class OidcResource {
     }
 
     private String jwt(String audience, String subject, String kid, boolean withEmptyScope) {
+        return jwt(audience, subject, kid, withEmptyScope, null, null);
+    }
+
+    private String jwt(String audience, String subject, String kid, boolean withEmptyScope, String acr, String authTime) {
         JwtClaimsBuilder builder = Jwt.claim("typ", "Bearer")
                 .upn("alice")
                 .preferredUserName("alice")
@@ -318,6 +392,14 @@ public class OidcResource {
 
         if (withEmptyScope) {
             builder.claim("scope", "");
+        }
+
+        if (acr != null && !acr.isEmpty()) {
+            builder.claim("acr", Arrays.asList(acr.split(",")));
+        }
+
+        if (authTime != null && !authTime.isEmpty()) {
+            builder.claim("auth_time", Long.parseLong(authTime));
         }
 
         return builder.jws().keyId(kid)

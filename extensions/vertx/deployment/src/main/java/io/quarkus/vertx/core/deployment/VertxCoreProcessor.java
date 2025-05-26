@@ -31,6 +31,7 @@ import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
 import io.quarkus.arc.deployment.SyntheticBeanBuildItem;
 import io.quarkus.arc.deployment.UnremovableBeanBuildItem;
 import io.quarkus.bootstrap.classloading.QuarkusClassLoader;
+import io.quarkus.deployment.IsDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
@@ -59,6 +60,7 @@ import io.quarkus.vertx.core.runtime.VertxLocalsHelper;
 import io.quarkus.vertx.core.runtime.VertxLogDelegateFactory;
 import io.quarkus.vertx.core.runtime.config.VertxConfiguration;
 import io.quarkus.vertx.core.runtime.context.SafeVertxContextInterceptor;
+import io.quarkus.vertx.deployment.VertxBuildConfig;
 import io.quarkus.vertx.mdc.provider.LateBoundMDCProvider;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Vertx;
@@ -117,77 +119,85 @@ class VertxCoreProcessor {
 
         for (String name : classes) {
             if (QuarkusClassLoader.isClassPresentAtRuntime(name)) {
-                BytecodeTransformerBuildItem transformation = new BytecodeTransformerBuildItem(name,
-                        (className, classVisitor) -> new ClassVisitor(Gizmo.ASM_API_VERSION, classVisitor) {
-                            @Override
-                            public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
-                                    String[] exceptions) {
-                                MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature, exceptions);
+                final BytecodeTransformerBuildItem transformation = new BytecodeTransformerBuildItem.Builder()
+                        .setClassToTransform(name)
+                        .setCacheable(true)
+                        .setVisitorFunction(
+                                (className, classVisitor) -> new ClassVisitor(Gizmo.ASM_API_VERSION, classVisitor) {
+                                    @Override
+                                    public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                            String signature,
+                                            String[] exceptions) {
+                                        MethodVisitor visitor = super.visitMethod(access, name, descriptor, signature,
+                                                exceptions);
 
-                                if (name.equals("get") || name.equals("put") || name.equals("remove")) {
-                                    return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
-                                        @Override
-                                        public void visitCode() {
-                                            super.visitCode();
-                                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                                    VertxLocalsHelper.class.getName().replace(".", "/"),
-                                                    "throwOnRootContextAccess",
-                                                    "()V", false);
+                                        if (name.equals("get") || name.equals("put") || name.equals("remove")) {
+                                            return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
+                                                @Override
+                                                public void visitCode() {
+                                                    super.visitCode();
+                                                    visitMethodInsn(Opcodes.INVOKESTATIC,
+                                                            VertxLocalsHelper.class.getName().replace('.', '/'),
+                                                            "throwOnRootContextAccess",
+                                                            "()V", false);
+                                                }
+                                            };
                                         }
-                                    };
-                                }
 
-                                if (name.equals("getLocal")) {
-                                    return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
-                                        @Override
-                                        public void visitCode() {
-                                            super.visitCode();
-                                            visitVarInsn(Opcodes.ALOAD, 0); // this
-                                            visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
-                                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                                    VertxLocalsHelper.class.getName().replace(".", "/"), "getLocal",
-                                                    "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;)Ljava/lang/Object;",
-                                                    false);
-                                            visitInsn(Opcodes.ARETURN);
+                                        if (name.equals("getLocal")
+                                                && descriptor.equals("(Ljava/lang/Object;)Ljava/lang/Object;")) {
+                                            return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
+                                                @Override
+                                                public void visitCode() {
+                                                    super.visitCode();
+                                                    visitVarInsn(Opcodes.ALOAD, 0); // this
+                                                    visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
+                                                    visitMethodInsn(Opcodes.INVOKESTATIC,
+                                                            VertxLocalsHelper.class.getName().replace('.', '/'), "getLocal",
+                                                            "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;)Ljava/lang/Object;",
+                                                            false);
+                                                    visitInsn(Opcodes.ARETURN);
+                                                }
+                                            };
                                         }
-                                    };
-                                }
 
-                                if (name.equals("putLocal")) {
-                                    return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
-                                        @Override
-                                        public void visitCode() {
-                                            super.visitCode();
-                                            visitVarInsn(Opcodes.ALOAD, 0); // this
-                                            visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
-                                            visitVarInsn(Opcodes.ALOAD, 2); // second param (object)
-                                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                                    VertxLocalsHelper.class.getName().replace(".", "/"), "putLocal",
-                                                    "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;Ljava/lang/Object;)V",
-                                                    false);
-                                            visitInsn(Opcodes.RETURN);
+                                        if (name.equals("putLocal")
+                                                && descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;)V")) {
+                                            return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
+                                                @Override
+                                                public void visitCode() {
+                                                    super.visitCode();
+                                                    visitVarInsn(Opcodes.ALOAD, 0); // this
+                                                    visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
+                                                    visitVarInsn(Opcodes.ALOAD, 2); // second param (object)
+                                                    visitMethodInsn(Opcodes.INVOKESTATIC,
+                                                            VertxLocalsHelper.class.getName().replace('.', '/'), "putLocal",
+                                                            "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;Ljava/lang/Object;)V",
+                                                            false);
+                                                    visitInsn(Opcodes.RETURN);
+                                                }
+                                            };
                                         }
-                                    };
-                                }
 
-                                if (name.equals("removeLocal")) {
-                                    return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
-                                        @Override
-                                        public void visitCode() {
-                                            super.visitCode();
-                                            visitVarInsn(Opcodes.ALOAD, 0); // this
-                                            visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
-                                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                                    VertxLocalsHelper.class.getName().replace(".", "/"), "removeLocal",
-                                                    "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;)Z", false);
-                                            visitInsn(Type.getType(Boolean.TYPE).getOpcode(Opcodes.IRETURN));
+                                        if (name.equals("removeLocal") && descriptor.equals("(Ljava/lang/Object;)Z")) {
+                                            return new MethodVisitor(Gizmo.ASM_API_VERSION, visitor) {
+                                                @Override
+                                                public void visitCode() {
+                                                    super.visitCode();
+                                                    visitVarInsn(Opcodes.ALOAD, 0); // this
+                                                    visitVarInsn(Opcodes.ALOAD, 1); // first param (object)
+                                                    visitMethodInsn(Opcodes.INVOKESTATIC,
+                                                            VertxLocalsHelper.class.getName().replace('.', '/'), "removeLocal",
+                                                            "(Lio/vertx/core/impl/ContextInternal;Ljava/lang/Object;)Z", false);
+                                                    visitInsn(Type.getType(Boolean.TYPE).getOpcode(Opcodes.IRETURN));
+                                                }
+                                            };
                                         }
-                                    };
-                                }
 
-                                return visitor;
-                            }
-                        });
+                                        return visitor;
+                                    }
+                                })
+                        .build();
                 transformer.produce(transformation);
             }
         }
@@ -208,6 +218,12 @@ class VertxCoreProcessor {
     @Record(ExecutionTime.STATIC_INIT)
     IOThreadDetectorBuildItem ioThreadDetector(VertxCoreRecorder recorder) {
         return new IOThreadDetectorBuildItem(recorder.detector());
+    }
+
+    @BuildStep
+    @Record(ExecutionTime.RUNTIME_INIT)
+    void configureLogging(VertxCoreRecorder recorder) {
+        recorder.configureQuarkusLoggerFactory();
     }
 
     @BuildStep
@@ -273,8 +289,27 @@ class VertxCoreProcessor {
 
     @BuildStep
     @Record(ExecutionTime.RUNTIME_INIT)
-    ContextHandlerBuildItem createVertxContextHandlers(VertxCoreRecorder recorder) {
-        return new ContextHandlerBuildItem(recorder.executionContextHandler());
+    void dontPropagateCdiContext(BuildProducer<IgnoredContextLocalDataKeysBuildItem> ignoredContextKeysProducer,
+            VertxCoreRecorder recorder, VertxBuildConfig buildConfig) {
+        if (buildConfig.customizeArcContext()) {
+            ignoredContextKeysProducer
+                    .produce(new IgnoredContextLocalDataKeysBuildItem(recorder.getIgnoredArcContextKeysSupplier()));
+        }
+    }
+
+    @BuildStep
+    @Record(ExecutionTime.RUNTIME_INIT)
+    ContextHandlerBuildItem createVertxContextHandlers(VertxCoreRecorder recorder,
+            List<IgnoredContextLocalDataKeysBuildItem> ignoredKeysSuppliersItems) {
+        var ignoredKeysSuppliers = ignoredKeysSuppliersItems.stream()
+                .map(IgnoredContextLocalDataKeysBuildItem::getIgnoredKeysSupplier).toList();
+        return new ContextHandlerBuildItem(recorder.executionContextHandler(ignoredKeysSuppliers));
+    }
+
+    @BuildStep(onlyIf = IsDevelopment.class)
+    @Record(ExecutionTime.RUNTIME_INIT)
+    public void resetMapper(VertxCoreRecorder recorder, ShutdownContextBuildItem shutdown) {
+        recorder.resetMapper(shutdown);
     }
 
     private void handleBlockingWarningsInDevOrTestMode() {
@@ -360,7 +395,7 @@ class VertxCoreProcessor {
                         debugPort = Integer.parseInt(m.group(2));
                         String host = m.group(1);
                         if (host.equals("*")) {
-                            host.equals("localhost");
+                            host = "localhost";
                         }
                         bindAddress = InetAddress.getByName(host);
                     }

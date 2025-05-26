@@ -5,7 +5,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
 
 import javax.inject.Inject;
 
@@ -20,13 +19,17 @@ import io.quarkus.gradle.extension.QuarkusPluginExtension;
 import io.quarkus.utilities.OS;
 
 public abstract class QuarkusTask extends DefaultTask {
-    private static final List<String> WORKER_BUILD_FORK_OPTIONS = List.of("quarkus.");
+    private static final List<String> WORKER_BUILD_FORK_OPTIONS = List.of("quarkus.", "platform.quarkus.");
 
     private final transient QuarkusPluginExtension extension;
     protected final File projectDir;
     protected final File buildDir;
 
     QuarkusTask(String description) {
+        this(description, false);
+    }
+
+    QuarkusTask(String description, boolean configurationCacheCompatible) {
         setDescription(description);
         setGroup("quarkus");
         this.extension = getProject().getExtensions().findByType(QuarkusPluginExtension.class);
@@ -35,7 +38,9 @@ public abstract class QuarkusTask extends DefaultTask {
 
         // Calling this method tells Gradle that it should not fail the build. Side effect is that the configuration
         // cache will be at least degraded, but the build will not fail.
-        notCompatibleWithConfigurationCache("The Quarkus Plugin isn't compatible with the configuration cache");
+        if (!configurationCacheCompatible) {
+            notCompatibleWithConfigurationCache("The Quarkus Plugin isn't compatible with the configuration cache");
+        }
     }
 
     @Inject
@@ -45,24 +50,29 @@ public abstract class QuarkusTask extends DefaultTask {
         return extension;
     }
 
-    WorkQueue workQueue(Map<String, String> configMap, Supplier<List<Action<? super JavaForkOptions>>> forkOptionsActions) {
+    WorkQueue workQueue(Map<String, String> configMap, List<Action<? super JavaForkOptions>> forkOptionsSupplier) {
         WorkerExecutor workerExecutor = getWorkerExecutor();
 
         // Use process isolation by default, unless Gradle's started with its debugging system property or the
-        // system property `quarkus.gradle-worker.no-process is set to `true`.
+        // system property `quarkus.gradle-worker.no-process` is set to `true`.
         if (Boolean.getBoolean("org.gradle.debug") || Boolean.getBoolean("quarkus.gradle-worker.no-process")) {
             return workerExecutor.classLoaderIsolation();
         }
 
         return workerExecutor.processIsolation(processWorkerSpec -> configureProcessWorkerSpec(processWorkerSpec,
-                configMap, forkOptionsActions.get()));
+                configMap, forkOptionsSupplier));
     }
 
     private void configureProcessWorkerSpec(ProcessWorkerSpec processWorkerSpec, Map<String, String> configMap,
             List<Action<? super JavaForkOptions>> customizations) {
         JavaForkOptions forkOptions = processWorkerSpec.getForkOptions();
-
         customizations.forEach(a -> a.execute(forkOptions));
+
+        // Propagate user.dir to load config sources that use it (instead of the worker user.dir)
+        String userDir = configMap.get("user.dir");
+        if (userDir != null) {
+            forkOptions.systemProperty("user.dir", userDir);
+        }
 
         String quarkusWorkerMaxHeap = System.getProperty("quarkus.gradle-worker.max-heap");
         if (quarkusWorkerMaxHeap != null && forkOptions.getAllJvmArgs().stream().noneMatch(arg -> arg.startsWith("-Xmx"))) {

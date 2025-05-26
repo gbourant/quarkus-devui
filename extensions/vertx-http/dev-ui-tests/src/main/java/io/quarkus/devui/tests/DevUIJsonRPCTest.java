@@ -1,5 +1,7 @@
 package io.quarkus.devui.tests;
 
+import static io.quarkus.runtime.LaunchMode.DEVELOPMENT;
+
 import java.io.IOException;
 import java.net.URI;
 import java.util.Map;
@@ -7,7 +9,7 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-import org.eclipse.microprofile.config.ConfigProvider;
+import org.eclipse.microprofile.config.spi.ConfigProviderResolver;
 import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.core.JsonFactory;
@@ -19,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.quarkus.test.config.TestConfigProviderResolver;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
@@ -40,13 +43,14 @@ public class DevUIJsonRPCTest {
     private final String testUrl;
 
     public DevUIJsonRPCTest(String namespace) {
-        this(namespace, ConfigProvider.getConfig().getValue("test.url", String.class));
+        this(namespace, ((TestConfigProviderResolver) ConfigProviderResolver.instance()).getConfig(DEVELOPMENT)
+                .getValue("test.url", String.class));
     }
 
     public DevUIJsonRPCTest(String namespace, String testUrl) {
         this.namespace = namespace;
         this.testUrl = testUrl;
-        String nonApplicationRoot = ConfigProvider.getConfig()
+        String nonApplicationRoot = ((TestConfigProviderResolver) ConfigProviderResolver.instance()).getConfig(DEVELOPMENT)
                 .getOptionalValue("quarkus.http.non-application-root-path", String.class).orElse("q");
         if (!nonApplicationRoot.startsWith("/")) {
             nonApplicationRoot = "/" + nonApplicationRoot;
@@ -59,7 +63,7 @@ public class DevUIJsonRPCTest {
     }
 
     @SuppressWarnings("unchecked")
-    public <T> T executeJsonRPCMethod(TypeReference typeReference, String methodName, Map<String, String> params)
+    public <T> T executeJsonRPCMethod(TypeReference typeReference, String methodName, Map<String, Object> params)
             throws Exception {
         int id = sendRequest(methodName, params);
         T response = getJsonRPCResponse(typeReference, id);
@@ -71,7 +75,7 @@ public class DevUIJsonRPCTest {
         return executeJsonRPCMethod(methodName, null);
     }
 
-    public JsonNode executeJsonRPCMethod(String methodName, Map<String, String> params) throws Exception {
+    public JsonNode executeJsonRPCMethod(String methodName, Map<String, Object> params) throws Exception {
         return executeJsonRPCMethod(JsonNode.class, methodName, params);
     }
 
@@ -80,7 +84,7 @@ public class DevUIJsonRPCTest {
     }
 
     @SuppressWarnings("unchecked")
-    public <T> T executeJsonRPCMethod(Class<T> classType, String methodName, Map<String, String> params) throws Exception {
+    public <T> T executeJsonRPCMethod(Class<T> classType, String methodName, Map<String, Object> params) throws Exception {
 
         int id = sendRequest(methodName, params);
         T response = getJsonRPCResponse(classType, id);
@@ -149,10 +153,10 @@ public class DevUIJsonRPCTest {
     }
 
     private JsonNode objectResultFromJsonRPC(int id, int loopCount) throws InterruptedException, JsonProcessingException {
-        if (MESSAGES.containsKey(id)) {
-            String response = MESSAGES.remove(id);
+        if (RESPONSES.containsKey(id)) {
+            WebSocketResponse response = RESPONSES.remove(id);
             if (response != null) {
-                ObjectNode json = (ObjectNode) new ObjectMapper().readTree(response);
+                ObjectNode json = (ObjectNode) new ObjectMapper().readTree(response.message());
                 JsonNode result = json.get("result");
                 if (result != null) {
                     return result.get("object");
@@ -168,7 +172,7 @@ public class DevUIJsonRPCTest {
         }
     }
 
-    private String createJsonRPCRequest(int id, String methodName, Map<String, String> params) throws IOException {
+    private String createJsonRPCRequest(int id, String methodName, Map<String, Object> params) throws IOException {
 
         ObjectNode request = mapper.createObjectNode();
 
@@ -177,15 +181,16 @@ public class DevUIJsonRPCTest {
         request.put("method", this.namespace + "." + methodName);
         ObjectNode jsonParams = mapper.createObjectNode();
         if (params != null && !params.isEmpty()) {
-            for (Map.Entry<String, String> p : params.entrySet()) {
-                jsonParams.put(p.getKey(), p.getValue());
+            for (Map.Entry<String, Object> p : params.entrySet()) {
+                JsonNode convertValue = mapper.convertValue(p.getValue(), JsonNode.class);
+                jsonParams.putIfAbsent(p.getKey(), convertValue);
             }
         }
         request.set("params", jsonParams);
         return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(request);
     }
 
-    private int sendRequest(String methodName, Map<String, String> params) throws IOException {
+    private int sendRequest(String methodName, Map<String, Object> params) throws IOException {
         int id = random.nextInt(Integer.MAX_VALUE);
         String request = createJsonRPCRequest(id, methodName, params);
         log.debug("request = " + request);
@@ -211,25 +216,48 @@ public class DevUIJsonRPCTest {
                 socket.frameHandler((e) -> {
                     Buffer b = accumulatedBuffer.appendBuffer(e.binaryData());
                     if (e.isFinal()) {
-                        MESSAGES.put(id, b.toString());
+                        RESPONSES.put(id, new WebSocketResponse(b.toString()));
                     }
                 });
 
                 socket.writeTextMessage(request);
 
                 socket.exceptionHandler((e) -> {
-                    e.printStackTrace();
+                    RESPONSES.put(id, new WebSocketResponse(e));
                     vertx.close();
                 });
                 socket.closeHandler(v -> {
                     vertx.close();
                 });
             } else {
+                RESPONSES.put(id, new WebSocketResponse(ar.cause()));
                 vertx.close();
             }
         });
         return id;
     }
 
-    private static final ConcurrentHashMap<Integer, String> MESSAGES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Integer, WebSocketResponse> RESPONSES = new ConcurrentHashMap<>();
+
+    private static class WebSocketResponse {
+        private final String message;
+        private final Throwable throwable;
+
+        public WebSocketResponse(String message) {
+            this.message = message;
+            this.throwable = null;
+        }
+
+        public WebSocketResponse(Throwable throwable) {
+            this.message = null;
+            this.throwable = throwable;
+        }
+
+        String message() {
+            if (throwable != null) {
+                throw new IllegalStateException("Request failed: " + throwable.getMessage(), throwable);
+            }
+            return message;
+        }
+    }
 }

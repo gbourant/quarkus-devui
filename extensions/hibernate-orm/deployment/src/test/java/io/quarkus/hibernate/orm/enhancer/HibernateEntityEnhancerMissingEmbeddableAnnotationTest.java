@@ -1,9 +1,3 @@
-/*
- * Hibernate, Relational Persistence for Idiomatic Java
- *
- * License: GNU Lesser General Public License (LGPL), version 2.1 or later.
- * See the lgpl.txt file in the root directory or <http://www.gnu.org/licenses/lgpl-2.1.html>.
- */
 package io.quarkus.hibernate.orm.enhancer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -37,6 +31,8 @@ class HibernateEntityEnhancerMissingEmbeddableAnnotationTest {
                             EntityWithEmbedded.EmbeddableWithAnnotation.class))
             .withConfigurationResource("application.properties")
             .assertException(ex -> assertThat(ex)
+                    .isNotNull()
+                    .cause()
                     .isNotNull()
                     .hasMessageContainingAll(
                             "Type " + EntityWithEmbedded.EmbeddableMissingAnnotation.class.getName(),
