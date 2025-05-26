@@ -231,6 +231,18 @@ public class UserTagSectionHelper extends IncludeSectionHelper implements Sectio
             return doFilter(e -> e.getKey().equals(e.getValue()));
         }
 
+        public Arguments startsWith(String... startsWithPrefix) {
+            Set<String> startsWithPrefixSet = Set.of(startsWithPrefix);
+            return doFilter(e -> {
+                for (String prefix : startsWithPrefixSet) {
+                    if (e.getKey().startsWith(prefix)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+
         // foo="1" bar="true" readonly="readonly"
         public RawString asHtmlAttributes() {
             StringBuilder builder = new StringBuilder();

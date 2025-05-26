@@ -263,4 +263,18 @@ public class UserTagTest {
                         {#arg hash='ia3andy'\n\tclass='rounded' /}
                         """).render().trim());
     }
+
+    @Test
+    public void testStartsWith() {
+        Engine engine = Engine.builder()
+                .addDefaults()
+                .addValueResolver(new ReflectionValueResolver())
+                .addSectionHelper(new UserTagSectionHelper.Factory("arg", "arg-tag"))
+                .addResultMapper(new HtmlEscaper(ImmutableList.of("text/html")))
+                .strictRendering(true)
+                .build();
+        engine.putTemplate("arg-tag", engine.parse("{_args.startsWith('hx-get','hx-post').asHtmlAttributes}"));
+        assertEquals("hx-get=\"/endpoint\" hx-post=\"/endpoint\"",
+                engine.parse("{#arg hx-get='/endpoint' hx-post='/endpoint' x-data='{}' /}").render());
+    }
 }
