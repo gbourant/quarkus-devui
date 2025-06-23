@@ -5,7 +5,6 @@ import static io.quarkus.gradle.tasks.QuarkusGradleUtils.getSourceSet;
 
 import java.io.File;
 import java.nio.file.Path;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -71,13 +70,13 @@ import io.quarkus.gradle.tasks.QuarkusTest;
 import io.quarkus.gradle.tasks.QuarkusTestConfig;
 import io.quarkus.gradle.tasks.QuarkusUpdate;
 import io.quarkus.gradle.tasks.services.ForcedPropertieBuildService;
+import io.quarkus.gradle.tooling.DefaultProjectDescriptor;
 import io.quarkus.gradle.tooling.GradleApplicationModelBuilder;
+import io.quarkus.gradle.tooling.ProjectDescriptorBuilder;
 import io.quarkus.gradle.tooling.ToolingUtils;
 import io.quarkus.gradle.tooling.dependency.DependencyUtils;
 import io.quarkus.gradle.tooling.dependency.ExtensionDependency;
 import io.quarkus.gradle.tooling.dependency.ProjectExtensionDependency;
-import io.quarkus.gradle.workspace.descriptors.DefaultProjectDescriptor;
-import io.quarkus.gradle.workspace.descriptors.ProjectDescriptorBuilder;
 import io.quarkus.runtime.LaunchMode;
 
 public class QuarkusPlugin implements Plugin<Project> {
@@ -182,7 +181,6 @@ public class QuarkusPlugin implements Plugin<Project> {
                     .getByName(ApplicationDeploymentClasspathBuilder.getBaseRuntimeConfigName(LaunchMode.DEVELOPMENT)));
         });
 
-        Provider<DefaultProjectDescriptor> projectDescriptor = ProjectDescriptorBuilder.buildForApp(project);
         ApplicationDeploymentClasspathBuilder normalClasspath = new ApplicationDeploymentClasspathBuilder(project,
                 LaunchMode.NORMAL);
         ApplicationDeploymentClasspathBuilder testClasspath = new ApplicationDeploymentClasspathBuilder(project,
@@ -190,6 +188,7 @@ public class QuarkusPlugin implements Plugin<Project> {
         ApplicationDeploymentClasspathBuilder devClasspath = new ApplicationDeploymentClasspathBuilder(project,
                 LaunchMode.DEVELOPMENT);
 
+        Provider<DefaultProjectDescriptor> projectDescriptor = ProjectDescriptorBuilder.buildForApp(project);
         TaskProvider<QuarkusApplicationModelTask> quarkusGenerateTestAppModelTask = tasks.register(
                 "quarkusGenerateTestAppModel",
                 QuarkusApplicationModelTask.class, task -> {
@@ -204,8 +203,7 @@ public class QuarkusPlugin implements Plugin<Project> {
 
         TaskProvider<QuarkusApplicationModelTask> quarkusGenerateAppModelTask = tasks.register("quarkusGenerateAppModel",
                 QuarkusApplicationModelTask.class, task -> {
-                    configureApplicationModelTask(project, task, projectDescriptor
-                            .map(d -> d.withSourceSetView(Collections.singleton(SourceSet.MAIN_SOURCE_SET_NAME))),
+                    configureApplicationModelTask(project, task, projectDescriptor,
                             normalClasspath, LaunchMode.NORMAL,
                             "quarkus/application-model/quarkus-app-model.dat");
                 });
@@ -237,8 +235,7 @@ public class QuarkusPlugin implements Plugin<Project> {
         TaskProvider<QuarkusApplicationModelTask> quarkusBuildAppModelTask = tasks.register("quarkusBuildAppModel",
                 QuarkusApplicationModelTask.class, task -> {
                     task.dependsOn(tasks.named(JavaPlugin.CLASSES_TASK_NAME));
-                    configureApplicationModelTask(project, task, projectDescriptor
-                            .map(d -> d.withSourceSetView(Collections.singleton(SourceSet.MAIN_SOURCE_SET_NAME))),
+                    configureApplicationModelTask(project, task, projectDescriptor,
                             normalClasspath, LaunchMode.NORMAL,
                             "quarkus/application-model/quarkus-app-model-build.dat");
                 });
@@ -252,9 +249,9 @@ public class QuarkusPlugin implements Plugin<Project> {
                 QuarkusBuildDependencies.class,
                 task -> {
                     configureQuarkusBuildTask(project, task, quarkusBuildAppModelTask, serviceProvider);
-
                     task.getOutputs().doNotCacheIf("Dependencies are never cached", t -> true);
                 });
+        project.afterEvaluate(evaluated -> addDependencyOnJandexIfConfigured(evaluated, quarkusBuildDependencies));
 
         Property<Boolean> cacheLargeArtifacts = quarkusExt.getCacheLargeArtifacts();
 
@@ -519,9 +516,9 @@ public class QuarkusPlugin implements Plugin<Project> {
         task.getOriginalClasspath().setFrom(classpath.getOriginalRuntimeClasspathAsInput());
         task.getAppClasspath().configureFrom(classpath.getRuntimeConfigurationWithoutResolvingDeployment());
         task.getPlatformConfiguration().configureFrom(classpath.getPlatformConfiguration());
+        task.getPlatformInfo().configureFrom(classpath.getPlatformPropertiesConfiguration());
         task.getDeploymentClasspath().configureFrom(classpath.getDeploymentConfiguration());
         task.getDeploymentResolvedWorkaround().from(classpath.getDeploymentConfiguration().getIncoming().getFiles());
-        task.getPlatformImports().set(classpath.getPlatformImportsWithoutResolvingPlatform());
         task.getApplicationModel().set(project.getLayout().getBuildDirectory().file(quarkusModelFile));
     }
 
@@ -649,7 +646,7 @@ public class QuarkusPlugin implements Plugin<Project> {
     }
 
     private void setupQuarkusBuildTaskDeps(Project project, Project dep, Set<String> visited) {
-        if (!visited.add(dep.getGroup() + ":" + dep.getName())) {
+        if (!visited.add(dep.getPath())) {
             return;
         }
 
@@ -666,16 +663,22 @@ public class QuarkusPlugin implements Plugin<Project> {
                 });
 
         getLazyTask(project, QUARKUS_DEV_TASK_NAME).ifPresent(quarkusDev -> {
-            for (String taskName : new String[] { JavaPlugin.PROCESS_RESOURCES_TASK_NAME,
-                    // This is the task of the 'org.kordamp.gradle.jandex' Gradle plugin
-                    "jandex",
-                    // This is the task of the 'com.github.vlsi.jandex' Gradle plugin
-                    "processJandexIndex" }) {
-                getLazyTask(dep, taskName).ifPresent(t -> quarkusDev.configure(qd -> qd.dependsOn(t)));
-            }
+            getLazyTask(project, JavaPlugin.PROCESS_RESOURCES_TASK_NAME)
+                    .ifPresent(t -> quarkusDev.configure(qd -> qd.dependsOn(t)));
+            addDependencyOnJandexIfConfigured(dep, quarkusDev);
         });
 
         visitProjectDependencies(project, dep, visited);
+    }
+
+    private void addDependencyOnJandexIfConfigured(Project project, TaskProvider<? extends Task> quarkusTask) {
+        for (String taskName : new String[] {
+                // This is the task of the 'org.kordamp.gradle.jandex' Gradle plugin
+                "jandex",
+                // This is the task of the 'com.github.vlsi.jandex' Gradle plugin
+                "processJandexIndex" }) {
+            getLazyTask(project, taskName).ifPresent(t -> quarkusTask.configure(qd -> qd.mustRunAfter(t)));
+        }
     }
 
     protected void visitProjectDependencies(Project project, Project dep, Set<String> visited) {
@@ -692,10 +695,10 @@ public class QuarkusPlugin implements Plugin<Project> {
                     .forEach(d -> {
                         Project depProject = null;
 
-                        if (d instanceof ProjectDependency) {
-                            depProject = dep.project(((ProjectDependency) d).getPath());
-                        } else if (d instanceof ExternalModuleDependency) {
-                            depProject = ToolingUtils.findIncludedProject(project, (ExternalModuleDependency) d);
+                        if (d instanceof ProjectDependency projectDep) {
+                            depProject = dep.project(projectDep.getPath());
+                        } else if (d instanceof ExternalModuleDependency externalModuleDep) {
+                            depProject = ToolingUtils.findIncludedProject(project, externalModuleDep);
                         }
 
                         if (depProject == null) {
@@ -714,13 +717,9 @@ public class QuarkusPlugin implements Plugin<Project> {
     private void visitLocalProject(Project project, Project localProject, Set<String> visited) {
         // local dependency, so we collect also its dependencies
         visitProjectDep(project, localProject, visited);
-
-        ExtensionDependency<?> extensionDependency = DependencyUtils
-                .getExtensionInfoOrNull(project, localProject);
-
-        if (extensionDependency instanceof ProjectExtensionDependency) {
-            visitProjectDep(project,
-                    ((ProjectExtensionDependency) extensionDependency).getDeploymentModule(), visited);
+        ExtensionDependency<?> extensionDependency = DependencyUtils.getExtensionInfoOrNull(project, localProject);
+        if (extensionDependency instanceof ProjectExtensionDependency projectExtDep) {
+            visitProjectDep(project, projectExtDep.getDeploymentModule(), visited);
         }
     }
 

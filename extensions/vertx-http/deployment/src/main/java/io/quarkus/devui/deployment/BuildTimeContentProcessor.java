@@ -49,6 +49,8 @@ import io.mvnpm.importmap.Location;
 import io.mvnpm.importmap.model.Imports;
 import io.quarkus.bootstrap.model.ApplicationModel;
 import io.quarkus.builder.Version;
+import io.quarkus.deployment.Capabilities;
+import io.quarkus.deployment.Capability;
 import io.quarkus.deployment.IsLocalDevelopment;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
@@ -113,6 +115,9 @@ public class BuildTimeContentProcessor {
         internalImportMapBuildItem.add("qwc-extension-link", contextRoot + "qwc/qwc-extension-link.js");
         // Quarkus UI
         internalImportMapBuildItem.add("qui-ide-link", contextRoot + "qui/qui-ide-link.js");
+        internalImportMapBuildItem.add("qui-themed-code-block", contextRoot + "qui/qui-themed-code-block.js");
+        internalImportMapBuildItem.add("qui-assistant-warning", contextRoot + "qui/qui-assistant-warning.js");
+        internalImportMapBuildItem.add("qui-assistant-button", contextRoot + "qui/qui-assistant-button.js");
 
         // Echarts
         internalImportMapBuildItem.add("echarts/", contextRoot + "echarts/");
@@ -138,6 +143,7 @@ public class BuildTimeContentProcessor {
         internalImportMapBuildItem.add("state/", contextRoot + "state/");
         internalImportMapBuildItem.add("theme-state", contextRoot + "state/theme-state.js");
         internalImportMapBuildItem.add("connection-state", contextRoot + "state/connection-state.js");
+        internalImportMapBuildItem.add("assistant-state", contextRoot + "state/assistant-state.js");
         internalImportMapBuildItem.add("devui-state", contextRoot + "state/devui-state.js");
 
         return internalImportMapBuildItem;
@@ -207,7 +213,10 @@ public class BuildTimeContentProcessor {
     @BuildStep(onlyIf = IsLocalDevelopment.class)
     DeploymentMethodBuildItem mapDeploymentMethods(
             List<BuildTimeActionBuildItem> buildTimeActions,
-            CurateOutcomeBuildItem curateOutcomeBuildItem) {
+            CurateOutcomeBuildItem curateOutcomeBuildItem,
+            Capabilities capabilities) {
+
+        final boolean assistantIsAvailable = capabilities.isPresent(Capability.ASSISTANT);
 
         List<String> methodNames = new ArrayList<>();
         List<String> subscriptionNames = new ArrayList<>();
@@ -218,19 +227,27 @@ public class BuildTimeContentProcessor {
                 String fullName = extensionPathName + "." + bta.getMethodName();
                 if (bta.hasRuntimeValue()) {
                     recordedValues.put(fullName, bta.getRuntimeValue());
-                } else {
+                    methodNames.add(fullName);
+                } else if (bta.hasAction()) {
                     DevConsoleManager.register(fullName, bta.getAction());
+                    methodNames.add(fullName);
+                } else if (bta.hasAssistantAction() && assistantIsAvailable) {
+                    DevConsoleManager.register(fullName, bta.getAssistantAction());
+                    methodNames.add(fullName);
                 }
-                methodNames.add(fullName);
             }
             for (BuildTimeAction bts : actions.getSubscriptions()) {
                 String fullName = extensionPathName + "." + bts.getMethodName();
                 if (bts.hasRuntimeValue()) {
                     recordedValues.put(fullName, bts.getRuntimeValue());
-                } else {
+                    subscriptionNames.add(fullName);
+                } else if (bts.hasAction()) {
                     DevConsoleManager.register(fullName, bts.getAction());
+                    subscriptionNames.add(fullName);
+                } else if (bts.hasAssistantAction() && assistantIsAvailable) {
+                    DevConsoleManager.register(fullName, bts.getAssistantAction());
+                    subscriptionNames.add(fullName);
                 }
-                subscriptionNames.add(fullName);
             }
         }
 
@@ -450,7 +467,7 @@ public class BuildTimeContentProcessor {
         addThemeBuildTimeData(internalBuildTimeData, devUIConfig, themeVarsProducer);
         addMenuSectionBuildTimeData(internalBuildTimeData, internalPages, extensionsBuildItem);
         addFooterTabBuildTimeData(internalBuildTimeData, extensionsBuildItem, devUIConfig);
-        addVersionInfoBuildTimeData(internalBuildTimeData, curateOutcomeBuildItem, nonApplicationRootPathBuildItem);
+        addApplicationInfoBuildTimeData(internalBuildTimeData, curateOutcomeBuildItem, nonApplicationRootPathBuildItem);
         addIdeBuildTimeData(internalBuildTimeData, effectiveIdeBuildItem, launchModeBuildItem);
         buildTimeConstProducer.produce(internalBuildTimeData);
     }
@@ -558,7 +575,7 @@ public class BuildTimeContentProcessor {
         internalBuildTimeData.addBuildTimeData("loggerLevels", LEVELS);
     }
 
-    private void addVersionInfoBuildTimeData(BuildTimeConstBuildItem internalBuildTimeData,
+    private void addApplicationInfoBuildTimeData(BuildTimeConstBuildItem internalBuildTimeData,
             CurateOutcomeBuildItem curateOutcomeBuildItem,
             NonApplicationRootPathBuildItem nonApplicationRootPathBuildItem) {
 
@@ -710,6 +727,9 @@ public class BuildTimeContentProcessor {
 
         light.put("--quarkus-center", QUARKUS_DARK.toString());
         dark.put("--quarkus-center", QUARKUS_LIGHT.toString());
+
+        light.put("--quarkus-assistant", QUARKUS_ASSISTANT.toString());
+        dark.put("--quarkus-assistant", QUARKUS_ASSISTANT.toString());
     }
 
     /**
@@ -1171,6 +1191,7 @@ public class BuildTimeContentProcessor {
     private static final Color QUARKUS_RED = Color.from(4, 90, 58);
     private static final Color QUARKUS_DARK = Color.from(0, 0, 13);
     private static final Color QUARKUS_LIGHT = Color.from(0, 0, 100);
+    private static final Color QUARKUS_ASSISTANT = Color.from(320, 100, 71);
 
     private static String getThemeSettingOrDefault(Optional<DevUIConfig.Theme> theme,
             Function<DevUIConfig.Theme, Optional<DevUIConfig.ThemeMode>> themeModeExtractor,

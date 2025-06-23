@@ -1,5 +1,6 @@
 package io.quarkus.hibernate.orm.deployment;
 
+import static io.quarkus.hibernate.orm.deployment.util.HibernateProcessorUtil.hasEntities;
 import static org.apache.commons.lang3.BooleanUtils.isFalse;
 
 import java.lang.reflect.Modifier;
@@ -87,7 +88,8 @@ public class HibernateOrmCdiProcessor {
     private static final List<DotName> CRITERIA_BUILDER_EXPOSED_TYPES = List.of(ClassNames.CRITERIA_BUILDER,
             ClassNames.HIBERNATE_CRITERIA_BUILDER);
     private static final List<DotName> METAMODEL_EXPOSED_TYPES = List.of(ClassNames.METAMODEL);
-    private static final List<DotName> SCHEMA_MANAGER_EXPOSED_TYPES = List.of(ClassNames.SCHEMA_MANAGER);
+    private static final List<DotName> SCHEMA_MANAGER_EXPOSED_TYPES = List.of(ClassNames.SCHEMA_MANAGER,
+            ClassNames.HIBERNATE_SCHEMA_MANAGER);
     private static final List<DotName> CACHE_EXPOSED_TYPES = List.of(ClassNames.CACHE, ClassNames.HIBERNATE_CACHE);
     private static final List<DotName> PERSISTENCE_UNIT_UTIL_EXPOSED_TYPES = List.of(ClassNames.PERSISTENCE_UNIT_UTIL);
 
@@ -264,7 +266,7 @@ public class HibernateOrmCdiProcessor {
             CombinedIndexBuildItem combinedIndex,
             List<PersistenceUnitDescriptorBuildItem> descriptors,
             JpaModelBuildItem jpaModel) {
-        if (!HibernateOrmProcessor.hasEntities(jpaModel)) {
+        if (!hasEntities(jpaModel)) {
             return;
         }
 
@@ -293,7 +295,7 @@ public class HibernateOrmCdiProcessor {
     void transformBeans(JpaModelBuildItem jpaModel, JpaModelIndexBuildItem indexBuildItem,
             BeanDiscoveryFinishedBuildItem beans,
             BuildProducer<BytecodeTransformerBuildItem> producer) {
-        if (!HibernateOrmProcessor.hasEntities(jpaModel)) {
+        if (!hasEntities(jpaModel)) {
             return;
         }
 
